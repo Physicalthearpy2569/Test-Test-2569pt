@@ -126,8 +126,17 @@ function jsonp_(action, payload) {
 // ปลุกสคริปต์ทันทีที่หน้าเว็บโหลด (ก่อนผู้ใช้กดอะไรเลย) เผื่อเครื่องเย็นอยู่ (ไม่มีคนใช้มาสักพัก)
 // กว่าผู้ใช้จะพิมพ์ชื่อ/รหัสผ่านแล้วกดเข้าสู่ระบบเสร็จ สคริปต์มักจะอุ่นพอแล้ว ไม่ต้องรอผลอะไรจากตรงนี้
 // คำตอบของ ping บอกรุ่นของหลังบ้านด้วย ใช้เตือนเมื่อวางโค้ดใหม่ใน Apps Script แล้วแต่ยังไม่ได้อัปเดตเว็บแอปเป็นเวอร์ชันใหม่
-const EXPECTED_BACKEND = '2026-10-10b';
-jsonp_('ping', {}).then(checkBackendVersion_).catch(() => {});
+const EXPECTED_BACKEND = '2026-10-10d';
+jsonp_('ping', {}).then(checkBackendVersion_).catch(backendUnreachable_);
+
+/** ping ไม่ได้คำตอบเลย: ส่วนใหญ่คืออัปเดตเว็บแอปก่อนอนุมัติสิทธิ์ใหม่ของสคริปต์ หรือเน็ตมีปัญหา */
+function backendUnreachable_() {
+  document.querySelectorAll('.version-banner').forEach(el => {
+    el.classList.remove('hidden');
+    el.textContent = 'เชื่อมต่อหลังบ้าน (Apps Script) ไม่ได้ — ตรวจอินเทอร์เน็ตแล้วรีเฟรชหน้านี้ ถ้าเพิ่งวางโค้ดใหม่ ให้เปิด Apps Script ' +
+      'เลือกฟังก์ชัน setupSatisfactionForm แล้วกด เรียกใช้ เพื่ออนุมัติสิทธิ์ที่เพิ่มขึ้น จากนั้นรีเฟรชหน้านี้อีกครั้ง';
+  });
+}
 
 function checkBackendVersion_(res) {
   const v = (res && res.data && res.data.version) || '';
@@ -2200,8 +2209,18 @@ function renderDashboard(d) {
         ${renderHBars_(d.byWeekday)}
       </div>
     </div>
+    ${renderFeedback_(d.feedback)}
   `;
   document.getElementById('dashToPatientsBtn')?.addEventListener('click', () => showView_('patients'));
+  document.getElementById('fbCopyBtn')?.addEventListener('click', async () => {
+    const input = document.getElementById('fbShareUrl');
+    try {
+      await navigator.clipboard.writeText(input.value);
+    } catch (e) {
+      input.select(); document.execCommand('copy'); // เบราว์เซอร์ที่ไม่ให้ใช้คลิปบอร์ดแบบใหม่
+    }
+    toast('คัดลอกลิงก์แบบประเมินแล้ว');
+  });
 }
 
 /* ---------------- ค้นหาคนไข้แบบย่อ (บนหน้าปฏิทิน): นัดครั้งหน้าวันไหน + ปุ่มไปหน้ารายละเอียด ---------------- */
@@ -2371,6 +2390,90 @@ async function gotoDate_(ymd) {
   state.month = Number(ymd.slice(5, 7));
   await renderCalendar();
   openDayPanel(ymd);
+}
+
+/* ---------------- ความพึงพอใจ (แบบประเมิน Google Form ไม่ระบุตัวตน) ---------------- */
+
+/** f = d.feedback จาก getDashboard — ไม่มี (หลังบ้านรุ่นเก่า) ไม่แสดงอะไร */
+function renderFeedback_(f) {
+  if (!f) return '';
+  const title = '<h3 class="dash-section-title">ความพึงพอใจ <span>แบบประเมิน Google Form · ไม่ระบุตัวตน</span></h3>';
+  if (f.error) {
+    return `${title}<div class="dash-panel"><p class="error-text">อ่านแท็บคำตอบของแบบประเมินไม่สำเร็จ: ${esc_(f.error)}</p></div>`;
+  }
+  if (!f.linked) {
+    return `${title}
+      <div class="dash-panel">
+        <p style="margin:0 0 8px;font-weight:600;">ยังไม่มีแบบประเมิน</p>
+        <ol class="fb-steps">
+          <li>เปิด Apps Script ของสเปรดชีตนี้ เลือกฟังก์ชัน <b>setupSatisfactionForm</b> แล้วกด เรียกใช้ (ครั้งแรกต้องอนุมัติสิทธิ์) ระบบจะสร้าง Google Form และลิงก์คำตอบเข้าสเปรดชีตนี้ให้เอง</li>
+          <li>กลับมากด รีเฟรช ที่หน้านี้ จะมีลิงก์สำหรับส่งให้คนไข้</li>
+        </ol>
+        <p class="dash-sub" style="margin:8px 0 0;">หรือสร้าง Google Form เองแล้วกด การตอบกลับ > ลิงก์ไปยังชีต > เลือกสเปรดชีตนี้ ก็ใช้ได้เหมือนกัน</p>
+      </div>`;
+  }
+  const share = f.shareUrl ? `
+      <div class="fb-share">
+        <span>ลิงก์สำหรับส่งให้คนไข้ (ทำ QR จากลิงก์นี้ได้)</span>
+        <input type="text" readonly id="fbShareUrl" value="${esc_(f.shareUrl)}" />
+        <button type="button" class="secondary" id="fbCopyBtn">คัดลอกลิงก์</button>
+        <a class="secondary" href="${esc_(f.shareUrl)}" target="_blank" rel="noopener">เปิดแบบประเมิน</a>
+      </div>` : '';
+  const head = `${title}${share}<p class="dash-sub">นับตามวันที่ตอบแบบประเมินในช่วงที่กรอง · อ่านจากแท็บ "${esc_(f.sheetName)}" · คำตอบทั้งหมดที่เคยได้ ${f.totalAll} รายการ</p>`;
+  if (!f.total) return `${head}<div class="dash-panel"><div class="dash-empty">ช่วงนี้ยังไม่มีคนตอบแบบประเมิน</div></div>`;
+
+  const o = f.overall;
+  const rate = f.responseRate === null || f.responseRate === undefined ? null : Math.round(f.responseRate * 100);
+  const kpis = [];
+  if (o) kpis.push({ label: 'ร้อยละความพึงพอใจ', num: o.percent.toFixed(1) + '%', cls: 'hero', sub: 'คะแนนเฉลี่ยทุกข้อ เทียบคะแนนเต็ม' });
+  if (o && o.avg !== null) kpis.push({ label: `คะแนนเฉลี่ย (เต็ม ${o.max})`, num: o.avg.toFixed(2) });
+  if (o) kpis.push({ label: 'ตอบระดับมากขึ้นไป', num: o.satisfied.toFixed(1) + '%', sub: 'สัดส่วนคำตอบที่ได้ 80% ของคะแนนเต็มขึ้นไป' });
+  kpis.push({ label: 'ผู้ตอบแบบประเมิน (คน)', num: f.total, sub: rate === null ? '' : (rate > 100 ? 'มากกว่าจำนวน visit ในช่วงนี้' : `ประมาณ ${rate}% ของ visit ในช่วงนี้`) });
+
+  const qRows = (f.questions || []).map(q => `<tr>
+      <td>${esc_(q.title)}</td>
+      <td>${q.avg === null ? '-' : q.avg.toFixed(2) + ' / ' + q.max}</td>
+      <td>${q.percent === null ? '-' : q.percent.toFixed(1) + '%'}</td>
+      <td>${q.satisfied === null ? '-' : q.satisfied.toFixed(1) + '%'}</td>
+      <td>${q.n}</td></tr>`).join('');
+  const choices = (f.choices || []).filter(c => c.n).map(c => `
+      <div class="dash-panel">
+        <h3>${esc_(c.title)}</h3>
+        ${c.counts.map(x => `
+        <div class="hbar-row">
+          <span class="hbar-label" title="${esc_(x.value)}">${esc_(x.value)}</span>
+          <div class="hbar-track"><div class="hbar-attended" style="width:${x.n / c.n * 100}%"></div></div>
+          <span class="hbar-num">${x.n} (${Math.round(x.n / c.n * 100)}%)</span>
+        </div>`).join('')}
+      </div>`).join('');
+  const comments = (f.comments || []).filter(c => c.n).map(c => `
+      <div class="dash-panel wide">
+        <h3>${esc_(c.title)}</h3>
+        <p class="dash-sub">${c.n} ข้อความในช่วงนี้${c.n > c.items.length ? ` · แสดง ${c.items.length} ข้อความล่าสุด` : ''}</p>
+        <ul class="fb-comments">${c.items.map(i => `<li><span class="fb-date">${esc_(fmtThaiDate_(i.date))}</span>${esc_(i.text)}</li>`).join('')}</ul>
+      </div>`).join('');
+
+  return `${head}
+    <div class="kpi-grid">
+      ${kpis.map(k => `
+        <div class="kpi-card ${k.cls || ''}">
+          <div class="kpi-num">${k.num}</div>
+          <div class="kpi-label">${k.label}</div>
+          ${k.sub ? `<div class="kpi-sub">${k.sub}</div>` : ''}
+        </div>`).join('')}
+    </div>
+    <div class="dash-grid">
+      ${qRows ? `
+      <div class="dash-panel wide">
+        <h3>คะแนนรายข้อ</h3>
+        <div class="table-scroll"><table class="mini-table fb-table">
+          <thead><tr><th>ข้อคำถาม</th><th>เฉลี่ย</th><th>ร้อยละ</th><th>ตอบระดับมากขึ้นไป</th><th>ผู้ตอบ</th></tr></thead>
+          <tbody>${qRows}</tbody>
+        </table></div>
+      </div>` : '<div class="dash-panel wide"><div class="dash-empty">ไม่พบข้อที่ตอบเป็นคะแนนในฟอร์ม (ใช้ชนิด "สเกลเชิงเส้น" หรือตัวเลือก มากที่สุด..น้อยที่สุด)</div></div>'}
+      ${choices}
+      ${comments}
+    </div>`;
 }
 
 function renderHBars_(rows, useColor) {

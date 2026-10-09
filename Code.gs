@@ -45,7 +45,7 @@ const PTN_FISCAL_YEAR = false; // false = นับปีตามปฏิท�
 
 // รุ่นของโค้ดหลังบ้าน — หน้าเว็บ (app.js) ใช้ค่านี้ตรวจว่าเว็บแอปถูกอัปเดตเป็นเวอร์ชันใหม่แล้วหรือยัง
 // (วางโค้ดใหม่ใน Apps Script แล้วแต่ยังไม่ได้กด "จัดการการทำให้ใช้งานได้ > เวอร์ชันใหม่" เว็บจะยังเรียกโค้ดรุ่นเก่าอยู่)
-const BACKEND_VERSION = '2026-10-10b';
+const BACKEND_VERSION = '2026-10-10d';
 
 const BUSY_TYPES = ['ประชุม', 'ทำเอกสาร', 'อบรม', 'ลา'];
 const APPT_TYPES = ['OPD', 'ลงชุมชน'];
@@ -1927,9 +1927,236 @@ function getDashboard_(payload) {
         newCases: newCases,
         returningCases: keys.length - newCases
       },
-      byType, byMoo, byClinic, byWeekday, trend
+      byType, byMoo, byClinic, byWeekday, trend,
+      feedback: feedbackForDashboard_(from, to, attended.length)
     }
   };
+}
+
+/* ---------------------------- ความพึงพอใจ (แบบประเมิน Google Form ไม่ระบุตัวตน) ---------------------------- */
+// คนไข้ตอบแบบประเมินผ่านลิงก์/QR ของ Google Form เมื่อไหร่ก็ได้ ไม่มีชื่อ ไม่ผูกกับนัดหรือ PTN
+// ฟอร์มถูก "ลิงก์ไปยังชีต" มาที่สเปรดชีตนี้ (Google สร้างแท็บคำตอบให้เอง) ระบบแค่อ่านแท็บนั้นมาสรุปตามช่วงเวลาที่กรอง
+// ตัวฟอร์มสร้างได้สองทาง: รัน setupSatisfactionForm() ให้สคริปต์สร้างและลิงก์ให้ หรือสร้างเองแล้วลิงก์เข้าสเปรดชีตนี้
+// การสรุปผลอ่านจากแท็บคำตอบอย่างเดียว จึงจะตั้ง/แก้คำถามในฟอร์มอย่างไรก็ได้:
+//   - ข้อที่ตอบเป็นคะแนน (สเกลเชิงเส้น 1-5 / 1-10 หรือตัวเลือก มากที่สุด..น้อยที่สุด) = ข้อคะแนน
+//   - ข้อที่มีตัวเลือกไม่กี่แบบ = นับจำนวนแต่ละตัวเลือก · ข้อความอิสระ = ข้อเสนอแนะ
+
+// คำถามตั้งต้นของแบบประเมินที่ setupSatisfactionForm() สร้างให้ (แก้/เพิ่ม/ลบในตัวฟอร์มภายหลังได้ ระบบสรุปผลตามคำถามที่มีจริง)
+const FEEDBACK_FORM_TITLE = 'แบบประเมินความพึงพอใจ งานกายภาพบำบัด';
+const FEEDBACK_FORM_DESCRIPTION = 'ไม่ต้องระบุชื่อ ใช้เวลาไม่เกิน 1 นาที คำตอบของท่านจะใช้เพื่อปรับปรุงบริการเท่านั้น\nให้คะแนน 1 = น้อยที่สุด ถึง 5 = มากที่สุด';
+const FEEDBACK_SCALE_QUESTIONS = [
+  'ความพึงพอใจต่อบริการโดยรวม',
+  'การอธิบายและให้คำแนะนำของผู้ให้บริการ',
+  'ความสุภาพและความเอาใจใส่ของผู้ให้บริการ',
+  'ระยะเวลารอคอยก่อนได้รับบริการ',
+  'ผลที่ได้รับหลังการรักษา'
+];
+const FEEDBACK_COMMENT_QUESTION = 'ข้อเสนอแนะเพิ่มเติม';
+
+/**
+ * รัน "ครั้งเดียว" จากตัวแก้ไข Apps Script (เลือก setupSatisfactionForm ข้างปุ่ม "เรียกใช้" แล้วกด Run)
+ * สิ่งที่ทำ: สร้าง Google Form แบบประเมินความพึงพอใจ (ไม่เก็บอีเมล ไม่ต้องล็อกอิน ตอบซ้ำได้) แล้วลิงก์คำตอบเข้าสเปรดชีตนี้
+ * จากนั้นดูลิงก์สำหรับส่งให้คนไข้ได้ใน "บันทึกการดำเนินการ" และในหน้าสถิติของเว็บ
+ * รันซ้ำได้ปลอดภัย: ถ้ามีแบบประเมินอยู่แล้วจะไม่สร้างซ้ำ แค่แสดงลิงก์เดิม
+ * ครั้งแรกที่รัน Google จะขอสิทธิ์ "ดูและจัดการฟอร์ม" เพิ่ม ต้องอนุมัติก่อน แล้วค่อยอัปเดตเว็บแอปเป็นเวอร์ชันใหม่
+ */
+function setupSatisfactionForm() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const props = PropertiesService.getScriptProperties();
+
+  const existingId = props.getProperty('FEEDBACK_FORM_ID');
+  if (existingId) {
+    let existing = null;
+    try { existing = FormApp.openById(existingId); } catch (e) { /* ฟอร์มถูกลบไปแล้ว สร้างใหม่ด้านล่าง */ }
+    if (existing) {
+      props.setProperty('FEEDBACK_FORM_URL', existing.getPublishedUrl());
+      Logger.log('มีแบบประเมินอยู่แล้ว ไม่สร้างซ้ำ');
+      Logger.log('ลิงก์สำหรับส่งให้คนไข้: ' + existing.getPublishedUrl());
+      Logger.log('ลิงก์สำหรับแก้ไขคำถาม: ' + existing.getEditUrl());
+      return;
+    }
+  }
+  const linked = findFeedbackSheet_();
+  if (linked) {
+    Logger.log('สเปรดชีตนี้มีแท็บคำตอบของฟอร์มอยู่แล้ว ("' + linked.name + '") จึงไม่สร้างฟอร์มใหม่ซ้ำ');
+    Logger.log('หน้าสถิติจะใช้แท็บนั้น ถ้าต้องการให้สคริปต์สร้างฟอร์มใหม่ ให้ยกเลิกการลิงก์ฟอร์มเดิมและลบแท็บนั้นก่อน แล้วรันอีกครั้ง');
+    return;
+  }
+
+  const form = FormApp.create(FEEDBACK_FORM_TITLE);
+  form.setDescription(FEEDBACK_FORM_DESCRIPTION);
+  form.setCollectEmail(false);            // ไม่ระบุตัวตน
+  form.setLimitOneResponsePerUser(false); // ไม่บังคับล็อกอิน ใครตอบเมื่อไหร่ก็ได้ ตอบซ้ำได้
+  form.setAllowResponseEdits(false);
+  form.setShowLinkToRespondAgain(true);
+  form.setConfirmationMessage('ขอบคุณที่ร่วมประเมิน ความเห็นของท่านจะถูกนำไปปรับปรุงบริการ');
+  // สองคำสั่งนี้มีผลเฉพาะบางประเภทบัญชี/ฟอร์ม ใช้ไม่ได้ก็ข้าม (ค่าเริ่มต้นของบัญชี Gmail ทั่วไปเปิดให้ทุกคนตอบได้อยู่แล้ว)
+  try { form.setRequireLogin(false); } catch (e) { /* ใช้ได้เฉพาะบัญชีองค์กร */ }
+  try { if (typeof form.setPublished === 'function') form.setPublished(true); } catch (e) { /* ฟอร์มรุ่นที่ไม่มีสถานะเผยแพร่ */ }
+
+  FEEDBACK_SCALE_QUESTIONS.forEach(q => {
+    form.addScaleItem().setTitle(q).setBounds(1, 5).setLabels('น้อยที่สุด', 'มากที่สุด').setRequired(true);
+  });
+  form.addParagraphTextItem().setTitle(FEEDBACK_COMMENT_QUESTION).setRequired(false);
+
+  form.setDestination(FormApp.DestinationType.SPREADSHEET, ss.getId()); // Google สร้างแท็บคำตอบในสเปรดชีตนี้ให้เอง
+  SpreadsheetApp.flush();
+
+  props.setProperty('FEEDBACK_FORM_ID', form.getId());
+  props.setProperty('FEEDBACK_FORM_URL', form.getPublishedUrl());
+  Logger.log('สร้างแบบประเมินและลิงก์เข้าสเปรดชีตนี้เรียบร้อย');
+  Logger.log('ลิงก์สำหรับส่งให้คนไข้: ' + form.getPublishedUrl());
+  Logger.log('ลิงก์สำหรับแก้ไขคำถาม: ' + form.getEditUrl());
+  Logger.log('ขั้นต่อไป: อัปเดตเว็บแอปเป็นเวอร์ชันใหม่ แล้วเปิดหน้าสถิติ');
+}
+
+const SYSTEM_SHEETS_ = [SHEET_USERS, SHEET_SCHEDULE, SHEET_SCHEDULE_SLOTS, SHEET_CLOSED, SHEET_BUSY, SHEET_APPTS, SHEET_CLINIC_TYPES,
+  SHEET_CLINIC_DAYS, SHEET_CLINIC_RULES, SHEET_SPECIAL_OPEN, SHEET_SPECIAL_SLOTS, SHEET_ICD10, SHEET_ICD9, SHEET_EXTRA_SLOTS, SHEET_BUSY_RULES, SHEET_PATIENTS];
+
+/** หาแท็บคำตอบของแบบประเมิน: แท็บที่ลิงก์กับ Google Form (หรือแท็บที่หัวคอลัมน์แรกเป็น "ประทับเวลา"/"Timestamp") */
+function findFeedbackSheet_() {
+  const candidates = [];
+  SpreadsheetApp.getActiveSpreadsheet().getSheets().forEach(sh => {
+    const name = sh.getName();
+    if (SYSTEM_SHEETS_.indexOf(name) !== -1) return;
+    let formUrl = '';
+    try { formUrl = sh.getFormUrl() || ''; } catch (e) { /* บางกรณีเรียกไม่ได้ ใช้การดูหัวคอลัมน์แทน */ }
+    let byHeader = false;
+    if (!formUrl && sh.getLastRow() >= 1) {
+      byHeader = /^(timestamp|ประทับเวลา)$/i.test(normText_(sh.getRange(1, 1).getValue()));
+    }
+    if (formUrl || byHeader) candidates.push({ sheet: sh, name: name, formUrl: formUrl });
+  });
+  if (!candidates.length) return null;
+  // มีหลายฟอร์มลิงก์อยู่: เลือกแท็บที่ชื่อบอกว่าเป็นแบบประเมิน ถ้าไม่มีใช้แท็บแรก
+  return candidates.find(c => /พึงพอใจ|ประเมิน|satisf|feedback/i.test(c.name)) || candidates[0];
+}
+
+/**
+ * แปลงคำตอบเป็นคะแนน — ไม่ใช่คำตอบแบบระดับคะแนนคืน null
+ * รับ: ตัวเลข 0-10, "5", "5 = มากที่สุด", "4 - มาก", "5 คะแนน", และคำระดับ มากที่สุด/มาก/ปานกลาง/น้อย/น้อยที่สุด
+ * (มีคำนำหน้า พึงพอใจ/พอใจ/เห็นด้วย ได้) — ตั้งใจเข้มงวด ตัวเลือกอย่าง "2-5 ครั้ง" หรือ "มากกว่า 5 ครั้ง" และคำชมอย่าง "ดีมาก" ต้องไม่ถูกนับเป็นคะแนน
+ */
+function likertValue_(v) {
+  if (typeof v === 'number') return (v >= 0 && v <= 10 && Math.floor(v) === v) ? v : null;
+  const s = normText_(v);
+  if (!s) return null;
+  let m = /^(\d{1,2})(?:\s*คะแนน|\s*[=:.)\-–]\s*\D.*)?$/.exec(s);
+  if (m) { const n = Number(m[1]); return n <= 10 ? n : null; }
+  m = /^(?:\d\s*)?(?:ระดับ)?(?:ความ)?(?:พึงพอใจ|พอใจ|เห็นด้วย)?\s*(มากที่สุด|น้อยที่สุด|ปานกลาง|มาก|น้อย)$/.exec(s);
+  if (!m) return null;
+  return { 'มากที่สุด': 5, 'มาก': 4, 'ปานกลาง': 3, 'น้อย': 2, 'น้อยที่สุด': 1 }[m[1]];
+}
+
+/** ไม่ให้ปัญหาของแท็บแบบประเมิน (เช่น มีคนแก้หัวตาราง) ทำให้หน้าสถิติทั้งหน้าเปิดไม่ได้ */
+function feedbackForDashboard_(from, to, visits) {
+  let shareUrl = '';
+  try { shareUrl = PropertiesService.getScriptProperties().getProperty('FEEDBACK_FORM_URL') || ''; } catch (e) { /* ไม่มีก็ไม่เป็นไร */ }
+  try {
+    return Object.assign(getFeedbackStats_(from, to, visits), { shareUrl: shareUrl }); // shareUrl = ลิงก์ตอบแบบประเมิน (รู้เฉพาะเมื่อสคริปต์เป็นผู้สร้างฟอร์ม)
+  } catch (e) {
+    return { linked: true, error: e.message, shareUrl: shareUrl };
+  }
+}
+
+/**
+ * สรุปคำตอบแบบประเมินในช่วง [from, to] (ตามเวลาที่ตอบ) — ไม่มีข้อมูลระบุตัวตน
+ * visits = จำนวน visit ในช่วงเดียวกัน ใช้คำนวณอัตราการตอบโดยประมาณ
+ */
+function getFeedbackStats_(from, to, visits) {
+  const found = findFeedbackSheet_();
+  if (!found) return { linked: false };
+  const sh = found.sheet;
+  const out = { linked: true, sheetName: found.name, formUrl: found.formUrl, total: 0, totalAll: 0, overall: null, questions: [], choices: [], comments: [], responseRate: null };
+  const lastRow = sh.getLastRow(), lastCol = sh.getLastColumn();
+  if (lastRow < 2 || lastCol < 2) return out;
+
+  const tz = Session.getScriptTimeZone();
+  const values = sh.getRange(1, 1, lastRow, lastCol).getValues();
+  const headers = values.shift().map(normText_);
+  const nonEmpty = v => !(v === '' || v === null || v === undefined);
+  const rows = values.filter(r => r.some(nonEmpty)).map(r => {
+    let date = '';
+    const t = r[0] instanceof Date ? r[0] : (nonEmpty(r[0]) ? new Date(r[0]) : null);
+    if (t && !isNaN(t)) date = Utilities.formatDate(t, tz, 'yyyy-MM-dd');
+    return { date: date, cells: r };
+  });
+  const inRange = rows.filter(r => r.date && r.date >= from && r.date <= to);
+  out.totalAll = rows.length;
+  out.total = inRange.length;
+  out.responseRate = visits > 0 ? Math.round(inRange.length / visits * 1000) / 1000 : null;
+
+  const round2 = n => Math.round(n * 100) / 100;
+  const allFractions = []; // คะแนนทุกคำตอบของทุกข้อ ในรูปสัดส่วนของคะแนนเต็ม ใช้คิดร้อยละรวม
+  const maxes = {};
+  for (let c = 1; c < lastCol; c++) {
+    const title = headers[c];
+    if (!title) continue;
+    if (/e-?mail|อีเมล|^คะแนน$|^score$/i.test(title)) continue; // ไม่แสดงอีเมล (ถ้าฟอร์มเผลอเปิดเก็บ) และคะแนนของโหมดแบบทดสอบ
+    const allVals = rows.map(r => r.cells[c]).filter(nonEmpty);
+    if (!allVals.length) continue;
+    const allScores = allVals.map(likertValue_).filter(v => v !== null);
+    // ช่องข้อเสนอแนะ/ความคิดเห็นเป็นข้อความเสมอ แม้ตอนคำตอบยังน้อยจะมีแต่คำสั้นๆ ที่หน้าตาคล้ายระดับคะแนน (เช่น "มาก")
+    const isCommentTitle = /ข้อเสนอแนะ|ความคิดเห็น|ความเห็น|เพิ่มเติม|อื่น ?ๆ|comment|suggest|feedback/i.test(title);
+
+    if (!isCommentTitle && allScores.length / allVals.length >= 0.8) {
+      // ข้อคะแนน: คะแนนเต็ม 5 เว้นแต่พบคำตอบเกิน 5 ถือว่าเต็ม 10
+      const max = Math.max.apply(null, allScores) > 5 ? 10 : 5;
+      maxes[max] = true;
+      const scores = inRange.map(r => likertValue_(r.cells[c])).filter(v => v !== null);
+      const dist = [];
+      for (let i = 1; i <= max; i++) dist.push(scores.filter(v => v === i).length);
+      const sum = scores.reduce((a, b) => a + b, 0);
+      scores.forEach(v => allFractions.push(v / max));
+      out.questions.push({
+        title: title,
+        n: scores.length,
+        max: max,
+        avg: scores.length ? round2(sum / scores.length) : null,
+        percent: scores.length ? round2(sum / scores.length / max * 100) : null,
+        satisfied: scores.length ? round2(scores.filter(v => v / max >= 0.8).length / scores.length * 100) : null, // ระดับมากขึ้นไป (4-5 จาก 5)
+        dist: dist
+      });
+      continue;
+    }
+
+    const texts = inRange.map(r => ({ date: r.date, text: normText_(r.cells[c]) })).filter(x => x.text);
+    const distinctAll = {};
+    allVals.forEach(v => { distinctAll[normText_(v)] = true; });
+    const nDistinct = Object.keys(distinctAll).length;
+    if (nDistinct <= 8 && allVals.length > nDistinct && Object.keys(distinctAll).every(k => k.length <= 40)) {
+      // ข้อตัวเลือก (เช่น ประเภทผู้ตอบ ช่วงอายุ): นับจำนวนแต่ละตัวเลือก
+      const counts = {};
+      texts.forEach(x => { counts[x.text] = (counts[x.text] || 0) + 1; });
+      out.choices.push({
+        title: title,
+        n: texts.length,
+        counts: Object.keys(counts).map(k => ({ value: k, n: counts[k] })).sort((a, b) => b.n - a.n)
+      });
+    } else {
+      // ข้อความอิสระ: ข้อเสนอแนะล่าสุด 30 รายการ
+      texts.sort((a, b) => a.date < b.date ? 1 : (a.date > b.date ? -1 : 0));
+      out.comments.push({
+        title: title,
+        n: texts.length,
+        items: texts.slice(0, 30).map(x => ({ date: x.date, text: x.text.length > 500 ? x.text.slice(0, 500) + '...' : x.text }))
+      });
+    }
+  }
+
+  if (allFractions.length) {
+    const mean = allFractions.reduce((a, b) => a + b, 0) / allFractions.length;
+    const maxList = Object.keys(maxes);
+    const max = maxList.length === 1 ? Number(maxList[0]) : null; // ทุกข้อคะแนนเต็มเท่ากันจึงบอกค่าเฉลี่ยรวมเป็นคะแนนได้
+    out.overall = {
+      percent: round2(mean * 100),
+      avg: max ? round2(mean * max) : null,
+      max: max,
+      satisfied: round2(allFractions.filter(f => f >= 0.8).length / allFractions.length * 100),
+      answers: allFractions.length
+    };
+  }
+  return out;
 }
 
 /* ---------------------------- Calendar / detail views ---------------------------- */
