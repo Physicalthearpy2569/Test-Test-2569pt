@@ -733,3 +733,42 @@ label {
   font-weight: 600;
 }
 .icd-slot-row select { width: auto; flex: 1; font-size: 15px; }
+
+/* ---------------- ทะเบียนคนไข้ (PTN): รายชื่อคนไข้เดิมในฟอร์มนัด ---------------- */
+
+.patient-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  background: var(--teal-tint);
+  color: var(--teal-dark);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+.patient-status button { font-size: 14px; font-weight: 600; color: var(--ink-soft); text-decoration: underline; white-space: nowrap; }
+
+.patient-suggest {
+  margin: -4px 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface);
+}
+.patient-suggest-head { font-size: 13px; color: var(--ink-soft); background: var(--bg); padding: 6px 12px; }
+.patient-suggest-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  padding: 9px 12px;
+  border-top: 1px solid var(--line);
+}
+.patient-suggest-item:hover, .patient-suggest-item:focus-visible { background: var(--teal-tint); outline: none; }
+.patient-suggest-name { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-size: 15px; font-weight: 600; color: var(--ink); }
+.patient-suggest-ptn { font-size: 14px; color: var(--teal-dark); white-space: nowrap; }
+.patient-suggest-sub { font-size: 13px; color: var(--ink-soft); }
