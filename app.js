@@ -126,7 +126,7 @@ function jsonp_(action, payload) {
 // ปลุกสคริปต์ทันทีที่หน้าเว็บโหลด (ก่อนผู้ใช้กดอะไรเลย) เผื่อเครื่องเย็นอยู่ (ไม่มีคนใช้มาสักพัก)
 // กว่าผู้ใช้จะพิมพ์ชื่อ/รหัสผ่านแล้วกดเข้าสู่ระบบเสร็จ สคริปต์มักจะอุ่นพอแล้ว ไม่ต้องรอผลอะไรจากตรงนี้
 // คำตอบของ ping บอกรุ่นของหลังบ้านด้วย ใช้เตือนเมื่อวางโค้ดใหม่ใน Apps Script แล้วแต่ยังไม่ได้อัปเดตเว็บแอปเป็นเวอร์ชันใหม่
-const EXPECTED_BACKEND = '2026-10-10d';
+const EXPECTED_BACKEND = '2026-10-10e';
 jsonp_('ping', {}).then(checkBackendVersion_).catch(backendUnreachable_);
 
 /** ping ไม่ได้คำตอบเลย: ส่วนใหญ่คืออัปเดตเว็บแอปก่อนอนุมัติสิทธิ์ใหม่ของสคริปต์ หรือเน็ตมีปัญหา */
@@ -152,11 +152,55 @@ function checkBackendVersion_(res) {
   if (tag) tag.textContent = `รุ่น ${EXPECTED_BACKEND}${ok ? '' : ' (หลังบ้าน: ' + (v || 'เก่า') + ')'}`;
 }
 
+// ความยาวสูงสุดของข้อมูล (หลังเข้ารหัสเป็น URL) ที่ส่งในคำขอเดียว — เกินนี้แบ่งส่งเป็นชิ้น (ข้อความไทย 1 ตัวอักษร = 9 ตัวใน URL)
+const API_SINGLE_MAX = 1800;
+const API_PART_MAX = 1400;
+
+/** แบ่งข้อความเป็นชิ้นที่แต่ละชิ้นยาวไม่เกิน API_PART_MAX เมื่อถูกใส่ใน JSON แล้วเข้ารหัสเป็น URL */
+function splitForUpload_(text) {
+  const pieces = [];
+  let cur = '', curLen = 0;
+  for (const ch of text) {
+    const len = encodeURIComponent(JSON.stringify(ch).slice(1, -1)).length;
+    if (curLen + len > API_PART_MAX && cur) { pieces.push(cur); cur = ''; curLen = 0; }
+    cur += ch; curLen += len;
+  }
+  if (cur) pieces.push(cur);
+  return pieces;
+}
+
+/** ส่งคำขอ 1 ครั้ง — ข้อมูลก้อนใหญ่ (เช่น เวชระเบียนทั้งชุด) ถูกแบ่งส่งเป็นชิ้นก่อน แล้วจึงเรียกคำสั่งจริงพร้อมเลขอ้างอิง */
+async function send_(action, payload) {
+  if (encodeURIComponent(JSON.stringify(payload)).length <= API_SINGLE_MAX) return jsonp_(action, payload);
+  const token = payload.token;
+  const body = Object.assign({}, payload);
+  delete body.token;
+  const pieces = splitForUpload_(JSON.stringify(body));
+  let id = '';
+  while (id.length < 16) id += Math.random().toString(36).slice(2);
+  id = id.slice(0, 16);
+  let next = 0, failed = null;
+  const worker = async () => {
+    while (next < pieces.length && !failed) {
+      const i = next++;
+      let res = null;
+      for (let attempt = 0; attempt < 2 && !(res && res.ok); attempt++) {
+        try { res = await jsonp_('uploadChunk', { token: token, id: id, i: i, n: pieces.length, part: pieces[i] }); } catch (e) { res = null; }
+        if (res && !res.ok) break; // หลังบ้านปฏิเสธ (เช่น ต้องเข้าสู่ระบบใหม่) ส่งซ้ำก็ไม่ผ่าน
+      }
+      if (!res || !res.ok) failed = res || { ok: false, error: 'ส่งข้อมูลไม่สำเร็จ กรุณากดบันทึกอีกครั้ง' };
+    }
+  };
+  await Promise.all([worker(), worker(), worker(), worker()]);
+  if (failed) return failed;
+  return jsonp_(action, { token: token, __upload: { id: id, n: pieces.length } });
+}
+
 async function api(action, payload = {}) {
   if (state.token) payload.token = state.token;
   let data;
   try {
-    data = await jsonp_(action, payload);
+    data = await send_(action, payload);
   } catch (e) {
     return { ok: false, error: 'เชื่อมต่อไม่สำเร็จ (หมดเวลารอ) กรุณาลองใหม่อีกครั้ง' };
   }
@@ -211,6 +255,12 @@ function logout() {
   const searchInput = document.getElementById('patientSearchInput');
   if (searchInput) searchInput.value = '';
   document.getElementById('todayPanel')?.classList.add('hidden');
+  // เข้าสู่ระบบครั้งถัดไป (อาจเป็นคนละคน คนละสิทธิ์) ต้องเริ่มที่ปฏิทินเสมอ และไม่เห็นเวชระเบียน/สถิติของคนก่อนหน้าค้างอยู่
+  if (typeof recordReset_ === 'function') recordReset_();
+  showView_('calendar');
+  state.dashboardLoaded = false;
+  const dashBody = document.getElementById('dashBody');
+  if (dashBody) dashBody.innerHTML = '';
   localStorage.clear();
   document.getElementById('appView').classList.add('hidden');
   document.getElementById('loginView').classList.remove('hidden');
@@ -236,7 +286,12 @@ function enterApp() {
 /* ---------------- Navigation ---------------- */
 
 function showView_(view) {
-  document.querySelectorAll('.navBtn').forEach(b => b.classList.toggle('active', b.dataset.view === view));
+  // ออกจากแบบฟอร์มเวชระเบียนที่ยังไม่ได้บันทึก: ถามก่อน (record.js)
+  if (typeof recordLeaveGuard_ === 'function' && !recordLeaveGuard_(view)) return;
+  const navView = view === 'record' ? 'patients' : view; // แบบฟอร์มเวชระเบียนเปิดจากหน้าคนไข้ เมนูจึงไฮไลต์ที่ค้นหาคนไข้
+  document.querySelectorAll('.navBtn').forEach(b => b.classList.toggle('active', b.dataset.view === navView));
+  document.getElementById('recordView')?.classList.toggle('hidden', view !== 'record');
+  if (view !== 'calendar') closeDayPanel(); // แผงรายละเอียดวันเป็นของหน้าปฏิทิน ไปหน้าอื่นต้องปิด ไม่งั้นบังเนื้อหา
   document.getElementById('calendarView').classList.toggle('hidden', view !== 'calendar');
   document.getElementById('settingsView').classList.toggle('hidden', view !== 'settings');
   document.getElementById('dashboardView')?.classList.toggle('hidden', view !== 'dashboard');
@@ -748,6 +803,9 @@ function openApptDetail(a) {
   ).join('');
 
   state.currentApptDetailId = a.id;
+  state.currentApptDetail = a;
+  const recBtn = document.getElementById('apptDetailRecordBtn');
+  if (recBtn) recBtn.style.display = (state.role === 'physio' && a.ptn) ? '' : 'none';
 
   document.getElementById('detailType').value = a.type;
   document.getElementById('detailFirstName').value = a.firstName || '';
@@ -845,6 +903,11 @@ function closeApptDetail() {
   apptDetailModalBackdrop?.classList.add('hidden');
 }
 document.getElementById('apptDetailCloseBtn')?.addEventListener('click', closeApptDetail);
+document.getElementById('apptDetailRecordBtn')?.addEventListener('click', () => {
+  const appt = state.currentApptDetail, date = state.currentDate;
+  closeApptDetail();
+  if (typeof openRecordsFromAppt_ === 'function') openRecordsFromAppt_(appt, date);
+});
 document.getElementById('apptDetailAttendBtn')?.addEventListener('click', async (e) => {
   const btn = e.currentTarget;
   const attended = !btn.dataset.attended; // ตอนนี้ยังไม่มา -> บันทึกว่ามา / ตอนนี้มาแล้ว -> ยกเลิกการบันทึก
@@ -2366,6 +2429,7 @@ function renderPatientProfile_(s, fallback) {
           <div class="kpi-label">${k.label}</div>
         </div>`).join('')}
     </div>
+    ${state.role === 'physio' ? '<div class="dash-panel" id="patientRecords" style="margin-bottom:16px;"></div>' : ''}
     <div class="dash-panel" style="margin-bottom:16px;">
       <h3>นัดที่รออยู่</h3>
       ${(s.upcoming || []).length
@@ -2380,6 +2444,7 @@ function renderPatientProfile_(s, fallback) {
         <tbody>${rows}</tbody></table></div>` : '<div class="dash-empty">ยังไม่มีนัดในระบบ</div>'}
     </div>`;
   box.querySelectorAll('[data-date]').forEach(el => el.addEventListener('click', () => gotoDate_(el.dataset.date)));
+  if (state.role === 'physio' && typeof loadPatientRecords_ === 'function') loadPatientRecords_(s.ptn);
 }
 
 /** ไปที่ปฏิทินของเดือนนั้น แล้วเปิดแผงรายละเอียดของวันนั้น */
@@ -2536,3 +2601,12 @@ function setupCollapsiblePanels_() {
 setupCollapsiblePanels_();
 
 if (state.token) enterApp();
+
+// record.js (เวชระเบียน) ต้องอัปโหลดคู่กับไฟล์นี้ ถ้าไม่มีให้เตือนชัด ๆ แทนที่จะปล่อยให้ปุ่มกดแล้วเงียบ
+window.addEventListener('load', () => {
+  if (typeof openRecordForm_ === 'function') return;
+  document.querySelectorAll('.version-banner').forEach(el => {
+    el.classList.remove('hidden');
+    el.textContent = 'ยังไม่พบไฟล์ record.js บนเว็บ — อัปโหลด record.js ขึ้น GitHub คู่กับ index.html, app.js, style.css แล้วรีเฟรชหน้านี้ (ส่วนเวชระเบียนจะยังใช้ไม่ได้)';
+  });
+});

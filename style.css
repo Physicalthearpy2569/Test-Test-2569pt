@@ -954,3 +954,79 @@ label {
     font-size: 12px; padding: 2px 7px; border-radius: 999px; width: auto; height: auto;
   }
 }
+
+
+/* ---------------- เวชระเบียน: แบบประเมินครั้งแรก ---------------- */
+/* แถบชุด 1-5 และแถบบันทึกต้องเกาะขอบจอขณะเลื่อน: กล่องเนื้อหาต้องไม่เป็นตัวเลื่อนเอง (ให้ทั้งหน้าเลื่อน) */
+.content:has(#recordView:not(.hidden)) { overflow: visible; min-width: 0; }
+.rec-head { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 18px 6px; margin-bottom: 12px; }
+.rec-head-top { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 8px; }
+.rec-head-top h2 { margin: 0; font-size: 21px; flex: 1 1 auto; }
+.rec-head-info { display: flex; flex-wrap: wrap; gap: 4px 22px; margin-bottom: 10px; }
+.rec-head .kv { font-size: 15px; color: var(--ink-soft); }
+.rec-head .kv b { color: var(--ink); font-weight: 600; }
+.rec-head-form { display: flex; flex-wrap: wrap; gap: 4px 16px; align-items: flex-end; }
+.rec-head-form label { margin-bottom: 8px; font-size: 13.5px; }
+.rec-head-form input, .rec-head-form select { width: auto; padding: 6px 9px; font-size: 15px; }
+.rec-birth { display: inline-flex; gap: 6px; }
+.rec-birth input { width: 72px; }
+#recBirthYear { width: 96px; }
+.rec-age { display: inline-flex; align-items: center; min-height: 35px; }
+.rec-age b { font-size: 17px; color: var(--ink); }
+#recAgeTyped { width: 80px; }
+.rec-mini { padding: 6px 12px; font-size: 14px; font-weight: 600; }
+.rec-steps { position: sticky; top: 0; z-index: 5; display: flex; gap: 6px; flex-wrap: wrap; padding: 8px 0; margin-bottom: 4px; background: var(--bg); }
+.rec-steps button { padding: 7px 14px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); font-size: 14px; white-space: nowrap; color: var(--ink); }
+.rec-steps button:hover, .rec-steps button:focus-visible { border-color: var(--teal); color: var(--teal-dark); outline: none; }
+.rec-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; margin-bottom: 14px; scroll-margin-top: 56px; }
+.rec-card > h3 { margin: 0 0 10px; font-size: 17px; display: flex; align-items: center; gap: 8px; }
+.rec-card > h3 .n { width: 26px; height: 26px; border-radius: 50%; background: var(--teal); color: #fff; font-size: 14px; display: inline-flex; align-items: center; justify-content: center; }
+.rec-sub { font-size: 13px; font-weight: 700; color: var(--ink-soft); background: var(--taupe-tint); margin: 12px -18px 4px; padding: 5px 18px; letter-spacing: .02em; }
+.rec-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; padding: 6px 0; border-bottom: 1px dashed var(--line); min-height: 44px; }
+.rec-card .rec-row:last-child { border-bottom: 0; }
+.rec-row > .lb { flex: 0 0 150px; font-size: 14.5px; font-weight: 600; color: var(--ink); }
+.rec-row label.ck { display: inline-flex; flex-direction: row; align-items: center; gap: 6px; font-size: 14.5px; color: var(--ink); margin: 0; white-space: nowrap; cursor: pointer; }
+.rec-row label.ck input { width: 18px; height: 18px; margin: 0; padding: 0; accent-color: var(--teal); flex: 0 0 auto; }
+.rec-row label.ck.lead { flex: 0 0 200px; font-weight: 600; white-space: normal; }
+.rec-row label.ck.warn { color: var(--danger); }
+.rec-row input[type=text], .rec-row input[type=number], .rec-row input[type=time], .rec-row select, .rec-row textarea {
+  margin: 0; padding: 6px 9px; font-size: 14.5px; width: 136px; font-family: inherit;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink);
+}
+.rec-row .s { width: 86px; } .rec-row .s2 { width: 120px; } .rec-row .m { width: 136px; } .rec-row .l { width: 200px; }
+.rec-row .x { flex: 1 1 220px; width: auto; min-width: 0; }
+.rec-row textarea { resize: vertical; line-height: 1.5; }
+.rec-row select:invalid, .rec-row select.rec-dd { color: var(--ink); }
+.rec-row .tx { font-size: 14px; color: var(--ink-soft); }
+.rec-grp { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.rec-nrs { display: inline-grid; grid-template-columns: repeat(11, 32px); gap: 3px; }
+.rec-nrs button { height: 32px; border: 1px solid var(--line); border-radius: 7px; font-size: 14px; background: var(--surface); color: var(--ink); padding: 0; }
+.rec-nrs button.on { background: var(--teal); border-color: var(--teal); color: #fff; font-weight: 700; }
+.rec-crit { font-size: 13px; color: var(--ink-soft); flex: 1 1 200px; min-width: 0; }
+.rec-crit.bad { color: var(--danger); font-weight: 600; }
+.rec-crit.good { color: var(--success); font-weight: 600; }
+.rec-foot { position: sticky; bottom: 0; z-index: 5; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 16px; box-shadow: 0 -4px 14px rgba(34,48,41,0.08); }
+.rec-foot .tx { font-size: 14px; color: var(--ink-soft); }
+.rec-foot .error-text { margin: 0; flex: 1 1 240px; }
+.rec-foot-btns { display: inline-flex; gap: 8px; margin-inline-start: auto; }
+#patientRecords h3 { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.rec-table th:not(:first-child), .rec-table td:not(:first-child) { text-align: left; }
+.rec-table td { vertical-align: middle; }
+.rec-actions { white-space: nowrap; text-align: right !important; }
+.rec-actions .rec-mini + .rec-mini { margin-inline-start: 6px; }
+.rec-del { color: var(--danger); }
+
+@media (max-width: 720px) {
+  .rec-head { padding: 12px 12px 4px; }
+  .rec-card { padding: 14px 12px; }
+  .rec-sub { margin-left: -12px; margin-right: -12px; padding-left: 12px; padding-right: 12px; }
+  .rec-row > .lb, .rec-row label.ck.lead { flex: 1 1 100%; }
+  .rec-nrs { grid-template-columns: repeat(11, minmax(0, 1fr)); width: 100%; }
+  .rec-nrs button { height: 38px; }
+  .rec-row .m, .rec-row .l { width: auto; flex: 1 1 130px; }
+  .rec-steps { flex-wrap: nowrap; overflow-x: auto; }
+  .rec-foot { padding: 8px 10px; }
+  /* จอแคบ ป้ายในปฏิทินถูกย่อเป็นจุดสี — ป้ายสถานะเวชระเบียนต้องอ่านเป็นข้อความได้ */
+  #patientRecords .badge, .rec-head .badge { font-size: 12px; width: auto; height: auto; padding: 2px 8px; border-radius: 999px; display: inline-block; }
+}

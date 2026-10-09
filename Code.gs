@@ -45,7 +45,7 @@ const PTN_FISCAL_YEAR = false; // false = นับปีตามปฏิท�
 
 // รุ่นของโค้ดหลังบ้าน — หน้าเว็บ (app.js) ใช้ค่านี้ตรวจว่าเว็บแอปถูกอัปเดตเป็นเวอร์ชันใหม่แล้วหรือยัง
 // (วางโค้ดใหม่ใน Apps Script แล้วแต่ยังไม่ได้กด "จัดการการทำให้ใช้งานได้ > เวอร์ชันใหม่" เว็บจะยังเรียกโค้ดรุ่นเก่าอยู่)
-const BACKEND_VERSION = '2026-10-10d';
+const BACKEND_VERSION = '2026-10-10e';
 
 const BUSY_TYPES = ['ประชุม', 'ทำเอกสาร', 'อบรม', 'ลา'];
 const APPT_TYPES = ['OPD', 'ลงชุมชน'];
@@ -201,6 +201,15 @@ function route_(action, payload) {
   const auth = verifyToken_(payload.token);
   if (!auth.ok) return { ok: false, error: 'กรุณาเข้าสู่ระบบใหม่' };
 
+  // ข้อมูลก้อนใหญ่ (เช่น เวชระเบียนทั้งชุด) ยาวเกินจะใส่ใน URL เดียว หน้าเว็บจึงส่งมาเป็นชิ้น ๆ ก่อน แล้วเรียกคำสั่งจริงพร้อมเลขอ้างอิง
+  if (action === 'uploadChunk') return uploadChunk_(payload, auth);
+  if (payload.__upload) {
+    const full = assembleUpload_(payload.__upload, auth);
+    if (!full.ok) return full;
+    full.payload.token = payload.token;
+    payload = full.payload;
+  }
+
   switch (action) {
     case 'getCalendar': return getCalendar_(payload);
     case 'getDayDetail': return getDayDetail_(payload);
@@ -211,6 +220,11 @@ function route_(action, payload) {
     case 'updateAppointmentInfo': return updateAppointmentInfo_(payload);
     case 'getPatients': return getPatients_();
     case 'getPatientSummary': return getPatientSummary_(payload);
+    case 'getRecordSetup': return requirePhysio_(auth, () => getRecordSetup_());
+    case 'getPatientRecords': return requirePhysio_(auth, () => getPatientRecords_(payload));
+    case 'getRecord': return requirePhysio_(auth, () => getRecord_(payload));
+    case 'saveRecord': return requirePhysio_(auth, () => saveRecord_(payload, auth));
+    case 'deleteRecord': return requirePhysio_(auth, () => deleteRecord_(payload));
 
     case 'getSettingsBundle': return requirePhysio_(auth, () => getSettingsBundle_());
     case 'getSchedule': return requirePhysio_(auth, () => getSchedule_());
@@ -251,6 +265,39 @@ function route_(action, payload) {
 
     default: return { ok: false, error: 'ไม่รู้จักคำสั่ง: ' + action };
   }
+}
+
+/* ---------------------------- รับข้อมูลก้อนใหญ่เป็นชิ้น ---------------------------- */
+// หน้าเว็บคุยกับสคริปต์ผ่าน URL (JSONP) ซึ่งยาวได้จำกัด ข้อความภาษาไทย 1 ตัวอักษรกินที่ใน URL ถึง 9 ตัว
+// ชิ้นส่วนถูกพักไว้ในแคชของสคริปต์ไม่กี่นาที แยกตามผู้ใช้ที่ล็อกอิน แล้วประกอบกลับตอนเรียกคำสั่งจริง
+const UPLOAD_MAX_PARTS = 80;
+function uploadKey_(username, id, i) {
+  return 'up_' + username + '_' + id + '_' + i;
+}
+function uploadChunk_(payload, auth) {
+  const id = String(payload.id || ''), i = Number(payload.i), n = Number(payload.n), part = payload.part;
+  if (!/^[A-Za-z0-9]{8,40}$/.test(id) || !(n >= 1 && n <= UPLOAD_MAX_PARTS) || !(i >= 0 && i < n) || Math.floor(i) !== i || Math.floor(n) !== n ||
+      typeof part !== 'string' || part.length > 4000) {
+    return { ok: false, error: 'ข้อมูลที่ส่งมาไม่ถูกต้อง' };
+  }
+  CacheService.getScriptCache().put(uploadKey_(auth.username, id, i), part, 900);
+  return { ok: true };
+}
+function assembleUpload_(u, auth) {
+  const id = String((u && u.id) || ''), n = Number(u && u.n);
+  if (!/^[A-Za-z0-9]{8,40}$/.test(id) || !(n >= 1 && n <= UPLOAD_MAX_PARTS) || Math.floor(n) !== n) return { ok: false, error: 'ข้อมูลที่ส่งมาไม่ถูกต้อง' };
+  const cache = CacheService.getScriptCache();
+  const keys = [];
+  for (let i = 0; i < n; i++) keys.push(uploadKey_(auth.username, id, i));
+  const got = cache.getAll(keys);
+  const parts = keys.map(k => got[k]);
+  if (parts.some(p => typeof p !== 'string')) return { ok: false, error: 'ส่งข้อมูลไม่ครบ กรุณากดบันทึกอีกครั้ง' };
+  let obj;
+  try { obj = JSON.parse(parts.join('')); } catch (e) { return { ok: false, error: 'ข้อมูลที่ส่งมาไม่สมบูรณ์ กรุณากดบันทึกอีกครั้ง' }; }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return { ok: false, error: 'ข้อมูลที่ส่งมาไม่ถูกต้อง' };
+  try { cache.removeAll(keys); } catch (e) { /* หมดอายุเองใน 15 นาที */ }
+  delete obj.__upload;
+  return { ok: true, payload: obj };
 }
 
 function requirePhysio_(auth, fn) {
@@ -1933,6 +1980,445 @@ function getDashboard_(payload) {
   };
 }
 
+/* ---------------------------- เวชระเบียน: แบบประเมินครั้งแรกของแต่ละ session ---------------------------- */
+// คนไข้ 1 คน (PTN เดิม) มีได้หลาย session — มาด้วยอาการใหม่ = เปิด session ใหม่ที่มีแบบประเมินครั้งแรกของตัวเอง
+//   Records        : 1 แถวต่อแบบประเมิน 1 ชุด คอลัมน์แรกเป็นข้อมูลกำกับ ที่เหลือคือช่องในแบบฟอร์ม (p1_.. = ชุดที่ 1, pt_.. = ผลทดสอบสมรรถภาพ)
+//                    ช่องในแบบฟอร์มกำหนดที่หน้าเว็บ (record.js) หลังบ้านเพิ่มคอลัมน์ให้เองเมื่อมีช่องใหม่ ทุกช่องเก็บเป็นข้อความ
+//                    (ไม่งั้นชีตจะแปลง "8-10" หรือ "3-5" เป็นวันที่)
+//   RecordOptions  : ตัวเลือกของดรอปดาวน์ 1 คอลัมน์ต่อ 1 รายการ — เพิ่ม/ลบ/แก้ในชีตได้ และค่าที่พิมพ์เองในเว็บถูกเติมต่อท้ายให้อัตโนมัติ
+//   AssessTests    : รายการทดสอบสมรรถภาพ = โหมดใหญ่ (group) + ตัวประเมินย่อย (name) พร้อมเกณฑ์
+//                    riskBelow: ค่าน้อยกว่านี้ = ต่ำกว่าเกณฑ์ · riskAbove: ค่ามากกว่านี้ = ต่ำกว่าเกณฑ์ (ใช้กับการจับเวลา) · interpret: การแปลผลเมื่อต่ำกว่าเกณฑ์
+//                    รายการใหม่ต้องมี key เป็นตัวอักษรอังกฤษ/ตัวเลขไม่เว้นวรรค · active = FALSE คือซ่อนจากแบบฟอร์ม
+//   AssessNorms    : ค่าปกติตามเพศและช่วงอายุ (ถ้าคนไข้อายุอยู่ในช่วงและรู้เพศ ใช้ตารางนี้ก่อน riskBelow/riskAbove)
+// ชีตทั้งหมดถูกสร้างให้เองตอนบันทึกเวชระเบียนครั้งแรก ไม่ต้องรันคำสั่งใดเพิ่ม
+const SHEET_RECORDS = 'Records';
+const SHEET_RECORD_OPTIONS = 'RecordOptions';
+const SHEET_ASSESS_TESTS = 'AssessTests';
+const SHEET_ASSESS_NORMS = 'AssessNorms';
+const RECORD_META_HEADERS = ['id', 'ptn', 'session', 'kind', 'date', 'status', 'createdAt', 'createdBy', 'updatedAt', 'updatedBy'];
+const RECORD_KEY_RE = /^(p[1-5]|pt)_[A-Za-z0-9_]{1,48}$/;
+const RECORD_MAX_KEYS = 600;
+const RECORD_MAX_TEXT = 1000;
+const OPTION_LIST_RE = /^[A-Za-z][A-Za-z0-9]{0,29}$/;
+const ASSESS_KEY_RE = /^[A-Za-z][A-Za-z0-9]{0,29}$/;
+const ASSESS_TEST_HEADERS = ['key', 'group', 'name', 'unit', 'better', 'riskBelow', 'riskAbove', 'interpret', 'askName', 'active'];
+const ASSESS_NORM_HEADERS = ['testKey', 'sex', 'ageFrom', 'ageTo', 'normalLow', 'normalHigh'];
+// เกณฑ์และการแปลผลจาก: ศรีวรรณ ปัญติ. คู่มือปฏิบัติการ การตรวจสมรรถภาพทางกายในผู้สูงอายุ (Senior Fitness Test; Rikli & Jones, 1999b, 2001)
+// รายการที่เอกสารนี้ไม่มีเกณฑ์ เว้น riskBelow/riskAbove ว่างไว้ให้เติมเองในชีต
+const ASSESS_DEFAULT_TESTS = [
+  { key: 'tug', group: 'Falling & Balance', name: 'Time up and go test', unit: 'วินาที', better: 'lower' },
+  { key: 'tugDual', group: 'Falling & Balance', name: 'Time up and go + dual task', unit: 'วินาที', better: 'lower' },
+  { key: 'gaitSpeed', group: 'Falling & Balance', name: 'Gait speed test', unit: 'วินาที', better: 'lower' },
+  { key: 'chairStand5', group: 'Strengthening', name: '5 Time Chair stand test', unit: 'ครั้ง', better: 'higher' },
+  { key: 'chairStand30', group: 'Strengthening', name: '30 second chair stand', unit: 'ครั้ง', better: 'higher', riskBelow: 8,
+    interpret: 'กล้ามเนื้อขาไม่แข็งแรง เสี่ยงต่อการจำกัดความสามารถในการเดิน ขึ้นลงบันได ลุกนั่ง และเสี่ยงหกล้ม' },
+  { key: 'handGrip', group: 'Strengthening', name: 'Hand Grip Strength', unit: 'กก.', better: 'higher' },
+  { key: 'armCurl', group: 'Strengthening', name: 'Arm Curl test', unit: 'ครั้ง', better: 'higher', riskBelow: 11,
+    interpret: 'กล้ามเนื้อแขนไม่แข็งแรง กระทบการทำงานบ้าน การยกและหิ้วของ' },
+  { key: 'step2min', group: 'Endurance', name: '2 Minute Step test', unit: 'ครั้ง', better: 'higher', riskBelow: 65,
+    interpret: 'ความทนทานของระบบหัวใจและหายใจต่ำ' },
+  { key: 'walk6min', group: 'Endurance', name: '6 Minute walk test', unit: 'เมตร', better: 'higher', riskBelow: 320,
+    interpret: 'ความทนทานของหัวใจและการหายใจต่ำ กระทบการเดินระยะไกลนอกบ้าน' },
+  { key: 'mmse', group: 'Cognitive', name: 'MMSE', unit: 'คะแนน', better: 'higher' },
+  { key: 'eq5d', group: 'QoL', name: 'EQ5D', unit: 'คะแนน', better: 'higher' },
+  { key: 'fq', group: 'Functional Questionnaire test', name: 'Functional Questionnaire', unit: 'คะแนน', better: '', askName: true }
+];
+// ค่าปกติ (ช่วงเปอร์เซ็นไทล์ที่ 25-75) ผู้สูงอายุ 60-94 ปี ตามตารางที่ 2 (ชาย) และ 3 (หญิง) ของเอกสารเดียวกัน — 6 Minute walk แปลงจากหลาเป็นเมตร
+const ASSESS_NORM_AGES = [[60, 64], [65, 69], [70, 74], [75, 79], [80, 84], [85, 89], [90, 94]];
+const ASSESS_NORM_TABLE = {
+  chairStand30: { M: [[14, 19], [12, 18], [12, 17], [11, 17], [10, 15], [8, 14], [7, 12]], F: [[12, 17], [11, 16], [10, 15], [10, 15], [9, 14], [8, 13], [4, 11]] },
+  armCurl: { M: [[16, 22], [15, 21], [14, 21], [13, 19], [13, 19], [11, 17], [10, 14]], F: [[13, 19], [12, 18], [12, 17], [11, 17], [10, 16], [10, 15], [8, 13]] },
+  step2min: { M: [[87, 115], [86, 116], [80, 110], [73, 109], [71, 103], [59, 91], [52, 86]], F: [[75, 107], [73, 107], [68, 101], [68, 100], [60, 90], [55, 85], [44, 72]] },
+  walk6minYards: { M: [[610, 735], [560, 700], [545, 680], [470, 640], [445, 605], [380, 570], [305, 500]], F: [[545, 660], [500, 635], [480, 615], [435, 585], [385, 540], [340, 510], [275, 440]] }
+};
+function assessDefaultNorms_() {
+  const out = [];
+  Object.keys(ASSESS_NORM_TABLE).forEach(k => {
+    const yards = k === 'walk6minYards';
+    const conv = v => yards ? Math.round(v * 0.9144) : v;
+    ['M', 'F'].forEach(sex => ASSESS_NORM_TABLE[k][sex].forEach((r, i) => {
+      out.push({ testKey: yards ? 'walk6min' : k, sex: sex, ageFrom: ASSESS_NORM_AGES[i][0], ageTo: ASSESS_NORM_AGES[i][1], normalLow: conv(r[0]), normalHigh: conv(r[1]) });
+    }));
+  });
+  return out;
+}
+// ตัวเลือกตั้งต้นของดรอปดาวน์ (เท่าที่เห็นในแบบฟอร์มเดิม) — รายการที่ว่างคือรอให้เติมเอง/ระบบจำจากค่าที่พิมพ์
+const RECORD_DEFAULT_OPTIONS = {
+  side: ['Right', 'Left', 'Both'], bodyPart: ['neck'], muscle: [], joint: [], direction: [],
+  ud: [], yesNo: ['Yes', 'No'], contraindication: [], redFlag: [], orangeFlag: [], yellowFlag: [],
+  medicalDx: ['Muscle strain'], ptDx: ['Upper cross syndrome'],
+  symptom: ['Pain'], frequency: ['Intermittent', 'Constant'], ease: ['นวด'],
+  specialTestUpper: [], specialTestLower: [], testResult: ['Positive', 'Negative'],
+  count: ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10'], timeUnit: ['visit', 'weeks', 'months'], functionGoal: [],
+  modParam1: [], modParam2: [], modMode: ['Pulse', 'Continuous'],
+  mobTechnique: [], mobGrade: ['I', 'II', 'III', 'IV'], exDetail: [],
+  reps: ['8-10'], setsPerDay: ['3'], daysPerWeek: ['3-5'],
+  gaitPattern: [], gaitAid: [], paMinutes: [], paDays: []
+};
+
+function recSheet_(name) {
+  return SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name);
+}
+function recRows_(name) {
+  return recSheet_(name) ? sheetData_(name) : [];
+}
+/** ขยายชีตให้มีจำนวนแถว/คอลัมน์พอก่อนเขียน (เขียนนอกขอบชีตจะผิดพลาด) */
+function recEnsureGrid_(sheet, rows, cols) {
+  if (rows > sheet.getMaxRows()) sheet.insertRowsAfter(sheet.getMaxRows(), rows - sheet.getMaxRows());
+  if (cols > sheet.getMaxColumns()) sheet.insertColumnsAfter(sheet.getMaxColumns(), cols - sheet.getMaxColumns());
+}
+function recHeaders_(sheet) {
+  const row = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), 1)).getValues()[0].map(h => normText_(h));
+  let last = row.length;
+  while (last > 0 && row[last - 1] === '') last--;
+  return row.slice(0, last);
+}
+/** เพิ่มหัวคอลัมน์ที่ยังไม่มีต่อท้าย (ตั้งทั้งคอลัมน์เป็นข้อความ) คืนรายการหัวคอลัมน์ล่าสุด */
+function recAddColumns_(sheet, names) {
+  const headers = recHeaders_(sheet);
+  const add = names.filter((n, i) => headers.indexOf(n) === -1 && names.indexOf(n) === i);
+  if (!add.length) return headers;
+  recEnsureGrid_(sheet, 1, headers.length + add.length);
+  sheet.getRange(1, headers.length + 1, sheet.getMaxRows(), add.length).setNumberFormat('@');
+  sheet.getRange(1, headers.length + 1, 1, add.length).setValues([add]);
+  return headers.concat(add);
+}
+function recDate_(v) {
+  if (v instanceof Date) { try { return fmtDate_(v); } catch (e) { return ''; } }
+  return normText_(v).slice(0, 10);
+}
+function recValidDate_(s) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(s))) return false;
+  const d = new Date(s + 'T00:00:00Z');
+  return !isNaN(d) && d.toISOString().slice(0, 10) === s;
+}
+function recNum_(v) {
+  if (v === '' || v === null || v === undefined) return null;
+  const n = Number(v);
+  return isFinite(n) ? n : null;
+}
+function recFlag_(v, dflt) {
+  if (v === true || v === false) return v;
+  const s = normText_(v).toLowerCase();
+  if (!s) return dflt;
+  return !/^(false|no|n|0|ปิด|ไม่|ไม่ใช้)$/.test(s);
+}
+function recBetter_(v) {
+  const s = normText_(v).toLowerCase();
+  if (/^(lower|low|less|น้อย|ลด)/.test(s)) return 'lower';
+  if (/^(higher|high|more|มาก|เพิ่ม)/.test(s)) return 'higher';
+  return '';
+}
+
+/** สร้างชีตของเวชระเบียนถ้ายังไม่มี (เรียกซ้ำได้ ไม่แตะข้อมูลเดิม) */
+function ensureRecordInfra_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const create = (name, headers, textCols) => {
+    if (ss.getSheetByName(name)) return null;
+    const sheet = ss.insertSheet(name);
+    recEnsureGrid_(sheet, 1, headers.length);
+    headers.forEach((h, i) => {
+      if (textCols === true || textCols.indexOf(h) !== -1) sheet.getRange(1, i + 1, sheet.getMaxRows(), 1).setNumberFormat('@');
+    });
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sheet.setFrozenRows(1);
+    invalidateCache_(name);
+    return sheet;
+  };
+  create(SHEET_RECORDS, RECORD_META_HEADERS, true);
+  const lists = Object.keys(RECORD_DEFAULT_OPTIONS);
+  const opt = create(SHEET_RECORD_OPTIONS, lists, true);
+  if (opt) {
+    const depth = Math.max.apply(null, lists.map(l => RECORD_DEFAULT_OPTIONS[l].length));
+    if (depth > 0) {
+      const block = [];
+      for (let r = 0; r < depth; r++) block.push(lists.map(l => RECORD_DEFAULT_OPTIONS[l][r] !== undefined ? RECORD_DEFAULT_OPTIONS[l][r] : ''));
+      opt.getRange(2, 1, depth, lists.length).setValues(block);
+    }
+    invalidateCache_(SHEET_RECORD_OPTIONS);
+  }
+  const tests = create(SHEET_ASSESS_TESTS, ASSESS_TEST_HEADERS, ['key', 'group', 'name', 'unit', 'better', 'interpret']);
+  if (tests) {
+    const rows = ASSESS_DEFAULT_TESTS.map(t => [t.key, t.group, t.name, t.unit, t.better, t.riskBelow !== undefined ? t.riskBelow : '',
+      t.riskAbove !== undefined ? t.riskAbove : '', t.interpret || '', t.askName ? 'TRUE' : '', 'TRUE']);
+    tests.getRange(2, 1, rows.length, ASSESS_TEST_HEADERS.length).setValues(rows);
+    invalidateCache_(SHEET_ASSESS_TESTS);
+  }
+  const norms = create(SHEET_ASSESS_NORMS, ASSESS_NORM_HEADERS, ['testKey', 'sex']);
+  if (norms) {
+    const rows = assessDefaultNorms_().map(n => ASSESS_NORM_HEADERS.map(h => n[h]));
+    norms.getRange(2, 1, rows.length, ASSESS_NORM_HEADERS.length).setValues(rows);
+    invalidateCache_(SHEET_ASSESS_NORMS);
+  }
+}
+
+/** รายการทดสอบตามลำดับในชีต AssessTests (ยังไม่มีชีต = รายการตั้งต้น) — แถวที่ key ไม่ถูกรูปแบบหรือซ้ำถูกข้าม */
+function assessTestsAll_() {
+  const src = recSheet_(SHEET_ASSESS_TESTS)
+    ? recRows_(SHEET_ASSESS_TESTS).map(r => ({ key: normText_(r.key), group: normText_(r.group) || 'อื่น ๆ', name: normText_(r.name), unit: normText_(r.unit),
+      better: recBetter_(r.better), riskBelow: recNum_(r.riskBelow), riskAbove: recNum_(r.riskAbove), interpret: normText_(r.interpret),
+      askName: recFlag_(r.askName, false), active: recFlag_(r.active, true) }))
+    : ASSESS_DEFAULT_TESTS.map(t => ({ key: t.key, group: t.group, name: t.name, unit: t.unit, better: t.better,
+      riskBelow: t.riskBelow !== undefined ? t.riskBelow : null, riskAbove: t.riskAbove !== undefined ? t.riskAbove : null, interpret: t.interpret || '',
+      askName: !!t.askName, active: true }));
+  const seen = {};
+  return src.filter(t => { if (!t.name || !ASSESS_KEY_RE.test(t.key) || seen[t.key]) return false; seen[t.key] = true; return true; });
+}
+function assessNorms_() {
+  const src = recSheet_(SHEET_ASSESS_NORMS) ? recRows_(SHEET_ASSESS_NORMS) : assessDefaultNorms_();
+  const out = [];
+  src.forEach(r => {
+    const sexRaw = normText_(r.sex).toUpperCase();
+    const sex = /^(M|ชาย|MALE)$/.test(sexRaw) ? 'M' : (/^(F|หญิง|FEMALE)$/.test(sexRaw) ? 'F' : '');
+    const n = { testKey: normText_(r.testKey), sex: sex, ageFrom: recNum_(r.ageFrom), ageTo: recNum_(r.ageTo), normalLow: recNum_(r.normalLow), normalHigh: recNum_(r.normalHigh) };
+    if (n.testKey && n.sex && n.ageFrom !== null && n.ageTo !== null && (n.normalLow !== null || n.normalHigh !== null)) out.push(n);
+  });
+  return out;
+}
+/** ตัวเลือกของดรอปดาวน์ทุกรายการ { ชื่อรายการ: [ตัวเลือก] } (ยังไม่มีชีต = ค่าตั้งต้น) */
+function recordOptions_() {
+  const sheet = recSheet_(SHEET_RECORD_OPTIONS);
+  const out = {};
+  if (!sheet) {
+    Object.keys(RECORD_DEFAULT_OPTIONS).forEach(l => { out[l] = RECORD_DEFAULT_OPTIONS[l].slice(); });
+    return out;
+  }
+  const values = sheet.getDataRange().getValues();
+  const headers = (values[0] || []).map(h => normText_(h));
+  headers.forEach((h, c) => {
+    if (!OPTION_LIST_RE.test(h) || out[h]) return;
+    const seen = {};
+    out[h] = [];
+    for (let r = 1; r < values.length; r++) {
+      const v = normText_(values[r][c] instanceof Date ? fmtDate_(values[r][c]) : values[r][c]);
+      if (v && !seen[v.toLowerCase()]) { seen[v.toLowerCase()] = true; out[h].push(v); }
+    }
+  });
+  return out;
+}
+/** เติมค่าที่ผู้ใช้พิมพ์เองต่อท้ายรายการตัวเลือก (ผู้เรียกถือตัวล็อกอยู่แล้ว) — learn: { ชื่อรายการ: [ค่า] } */
+function recordLearnOptions_(learn) {
+  if (!learn || typeof learn !== 'object') return;
+  const sheet = recSheet_(SHEET_RECORD_OPTIONS);
+  if (!sheet) return;
+  const current = recordOptions_();
+  let changed = false;
+  Object.keys(learn).slice(0, 60).forEach(list => {
+    if (!OPTION_LIST_RE.test(list) || !Array.isArray(learn[list])) return;
+    const have = (current[list] || []).map(v => v.toLowerCase());
+    const add = [];
+    learn[list].slice(0, 10).forEach(v => {
+      const s = normText_(v).slice(0, 60);
+      if (s && have.indexOf(s.toLowerCase()) === -1) { have.push(s.toLowerCase()); add.push(s); }
+    });
+    if (!add.length) return;
+    const headers = recAddColumns_(sheet, [list]);
+    const col = headers.indexOf(list) + 1;
+    const colVals = sheet.getRange(1, col, Math.max(sheet.getLastRow(), 1), 1).getValues();
+    let last = colVals.length;
+    while (last > 1 && normText_(colVals[last - 1][0]) === '') last--;
+    recEnsureGrid_(sheet, last + add.length, col);
+    sheet.getRange(last + 1, col, add.length, 1).setNumberFormat('@').setValues(add.map(v => [v]));
+    changed = true;
+  });
+  if (changed) invalidateCache_(SHEET_RECORD_OPTIONS);
+}
+
+/** ข้อมูลตั้งต้นของแบบฟอร์ม: ตัวเลือกดรอปดาวน์ รายการทดสอบพร้อมเกณฑ์ และตารางค่าปกติ */
+function getRecordSetup_() {
+  return {
+    ok: true,
+    data: {
+      options: recordOptions_(),
+      tests: assessTestsAll_().filter(t => t.active).map(t => ({ key: t.key, group: t.group, name: t.name, unit: t.unit, better: t.better,
+        riskBelow: t.riskBelow, riskAbove: t.riskAbove, interpret: t.interpret, askName: t.askName })),
+      norms: assessNorms_()
+    }
+  };
+}
+
+/** เพศ ('M'/'F') และวันเกิด ('yyyy-MM-dd') ของคนไข้จากทะเบียน */
+function patientExtra_(p) {
+  const sexRaw = normText_(p.sex).toUpperCase();
+  const bd = recDate_(p.birthDate);
+  return { sex: /^(M|ชาย)$/.test(sexRaw) ? 'M' : (/^(F|หญิง)$/.test(sexRaw) ? 'F' : ''), birthDate: recValidDate_(bd) ? bd : '' };
+}
+function recordPatient_(reg) {
+  return Object.assign(publicPatient_(reg), patientExtra_(reg));
+}
+/** บันทึกเพศ/วันเกิดลงทะเบียนคนไข้ (เฉพาะช่องที่ส่งมา) — คืนข้อความผิดพลาด หรือ '' เมื่อสำเร็จ */
+function setPatientExtra_(ptn, extra) {
+  if (!extra || typeof extra !== 'object') return '';
+  const set = {};
+  if (extra.sex !== undefined) {
+    const s = normText_(extra.sex).toUpperCase();
+    if (s !== '' && s !== 'M' && s !== 'F') return 'เพศไม่ถูกต้อง';
+    set.sex = s;
+  }
+  if (extra.birthDate !== undefined) {
+    const b = normText_(extra.birthDate);
+    if (b !== '' && (!recValidDate_(b) || b > todayStr_() || b < '1900-01-01')) return 'วันเกิดไม่ถูกต้อง';
+    set.birthDate = b;
+  }
+  if (!Object.keys(set).length) return '';
+  const sheet = recSheet_(SHEET_PATIENTS);
+  invalidateCache_(SHEET_PATIENTS);
+  const row = patientsData_().find(p => normText_(p.ptn) === ptn);
+  if (!sheet || !row) return 'ไม่พบคนไข้ ' + ptn + ' ในทะเบียน';
+  const now = patientExtra_(row);
+  const todo = Object.keys(set).filter(k => set[k] !== now[k]);
+  if (!todo.length) return '';
+  const headers = recAddColumns_(sheet, ['birthDate', 'sex']);
+  todo.forEach(k => sheet.getRange(row._row, headers.indexOf(k) + 1).setNumberFormat('@').setValue(set[k]));
+  invalidateCache_(SHEET_PATIENTS);
+  return '';
+}
+
+function recordMeta_(r) {
+  return { id: normText_(r.id), ptn: normText_(r.ptn), session: recNum_(r.session) || 0, kind: normText_(r.kind) || 'initial', date: recDate_(r.date),
+    status: normText_(r.status) === 'final' ? 'final' : 'draft', createdAt: normText_(r.createdAt instanceof Date ? r.createdAt.toISOString() : r.createdAt),
+    createdBy: normText_(r.createdBy), updatedAt: normText_(r.updatedAt instanceof Date ? r.updatedAt.toISOString() : r.updatedAt), updatedBy: normText_(r.updatedBy) };
+}
+function recordCell_(v) {
+  if (v instanceof Date) { try { return fmtDate_(v); } catch (e) { return ''; } }
+  return v === undefined || v === null ? '' : String(v);
+}
+
+/** รายการเวชระเบียนของคนไข้ 1 คน (ใหม่สุดก่อน) — payload: { ptn } */
+function getPatientRecords_(payload) {
+  const ptn = normText_(payload.ptn);
+  if (!ptn) return { ok: false, error: 'ไม่ได้ระบุ PTN' };
+  const reg = patientsData_().find(p => normText_(p.ptn) === ptn);
+  if (!reg) return { ok: false, error: 'ไม่พบคนไข้ ' + ptn + ' ในทะเบียน' };
+  const records = recRows_(SHEET_RECORDS).filter(r => normText_(r.id) && normText_(r.ptn) === ptn).map(r => {
+    const m = recordMeta_(r);
+    m.chiefComplaint = recordCell_(r.p1_cc);
+    m.medicalDx = [r.p1_mdx1, r.p1_mdx2, r.p1_mdx3, r.p1_mdx4].map(recordCell_).filter(Boolean).join(', ');
+    m.ptDx = recordCell_(r.p1_ptdx);
+    return m;
+  }).sort((a, b) => (b.session - a.session) || (a.date < b.date ? 1 : -1));
+  return { ok: true, data: { ptn: ptn, today: todayStr_(), patient: recordPatient_(reg), records: records } };
+}
+
+/** เวชระเบียน 1 ชุดพร้อมทุกช่องในแบบฟอร์ม — payload: { id } */
+function getRecord_(payload) {
+  const id = normText_(payload.id);
+  const row = id ? recRows_(SHEET_RECORDS).find(r => normText_(r.id) === id) : null;
+  if (!row) return { ok: false, error: 'ไม่พบเวชระเบียนนี้' };
+  const meta = recordMeta_(row);
+  const data = {};
+  Object.keys(row).forEach(k => {
+    if (!RECORD_KEY_RE.test(k)) return;
+    const v = recordCell_(row[k]);
+    if (v !== '') data[k] = v;
+  });
+  const reg = patientsData_().find(p => normText_(p.ptn) === meta.ptn);
+  return { ok: true, data: { record: Object.assign(meta, { data: data }), patient: reg ? recordPatient_(reg) : null, today: todayStr_() } };
+}
+
+/**
+ * บันทึกเวชระเบียน — payload: { id?, ptn, date, status: 'draft'|'final', data: { ช่อง: ค่า }, patient?: { sex, birthDate }, learn?: { รายการ: [ค่า] } }
+ * ไม่มี id = เปิด session ใหม่ของคนไข้คนนี้ (เลข session ถัดไป) · มี id = แก้ไขชุดเดิม (ทุกช่องถูกแทนที่ด้วยค่าที่ส่งมา)
+ * ชุดที่บันทึกเป็น final แล้วยังแก้ไขได้ (มีชื่อผู้แก้และเวลา) แต่ถอยกลับเป็นร่างไม่ได้
+ */
+function saveRecord_(payload, auth) {
+  const ptn = normText_(payload.ptn);
+  const date = String(payload.date || '');
+  if (!ptn) return { ok: false, error: 'ไม่ได้ระบุ PTN' };
+  if (!recValidDate_(date)) return { ok: false, error: 'รูปแบบวันที่ไม่ถูกต้อง' };
+  if (date > todayStr_()) return { ok: false, error: 'วันที่ประเมินต้องไม่เกินวันนี้' };
+  if (!patientsData_().some(p => normText_(p.ptn) === ptn)) return { ok: false, error: 'ไม่พบคนไข้ ' + ptn + ' ในทะเบียน' };
+  let status = payload.status === 'final' ? 'final' : 'draft';
+
+  const input = payload.data && typeof payload.data === 'object' && !Array.isArray(payload.data) ? payload.data : {};
+  const keys = Object.keys(input);
+  if (keys.length > RECORD_MAX_KEYS) return { ok: false, error: 'ข้อมูลในแบบฟอร์มมากเกินไป' };
+  const data = {};
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    if (!RECORD_KEY_RE.test(k)) return { ok: false, error: 'ช่องในแบบฟอร์มไม่ถูกต้อง: ' + k };
+    let v = input[k];
+    if (v === true) v = 'Y';
+    else if (v === false || v === null || v === undefined) v = '';
+    else if (typeof v === 'number') { if (!isFinite(v)) return { ok: false, error: 'ค่าตัวเลขไม่ถูกต้อง: ' + k }; v = String(v); }
+    else if (typeof v === 'string') v = v.replace(/\r/g, '').replace(/[ \t]+/g, ' ').trim().slice(0, RECORD_MAX_TEXT);
+    else return { ok: false, error: 'ค่าในช่องไม่ถูกต้อง: ' + k };
+    if (v !== '') data[k] = v;
+  }
+  // ผลทดสอบสมรรถภาพต้องเป็นตัวเลข (ช่องชื่อแบบสอบถามลงท้าย _label เป็นข้อความได้)
+  const badNum = Object.keys(data).find(k => /^pt_/.test(k) && !/_label$/.test(k) && (recNum_(data[k]) === null || recNum_(data[k]) < 0 || recNum_(data[k]) > 99999));
+  if (badNum) return { ok: false, error: 'ผลทดสอบต้องเป็นตัวเลข 0-99999: ' + badNum.slice(3) };
+  const badNrs = ['p2_nrs_rest', 'p2_nrs_func'].find(k => data[k] !== undefined && !/^(10|[0-9])$/.test(data[k]));
+  if (badNrs) return { ok: false, error: 'NRS ต้องเป็นเลข 0-10' };
+  if (status === 'final' && !data.p1_cc) return { ok: false, error: 'กรอก Chief complaint ก่อนบันทึกเวชระเบียน (หรือกด บันทึกร่าง ไว้ก่อน)' };
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  let id = normText_(payload.id), session = 0, updated = false;
+  try {
+    ensureRecordInfra_();
+    // เพศ/วันเกิดตรวจและบันทึกก่อน ถ้าไม่ถูกต้องจะยังไม่เขียนเวชระเบียน
+    const perr = setPatientExtra_(ptn, payload.patient);
+    if (perr) return { ok: false, error: perr };
+    invalidateCache_(SHEET_RECORDS);
+    const sheet = recSheet_(SHEET_RECORDS);
+    const rows = sheetData_(SHEET_RECORDS).filter(r => normText_(r.id));
+    const nowIso = new Date().toISOString();
+    let meta, rowIndex;
+    if (id) {
+      const existing = rows.find(r => normText_(r.id) === id);
+      if (!existing) return { ok: false, error: 'ไม่พบเวชระเบียนนี้ (อาจถูกลบไปแล้ว)' };
+      meta = recordMeta_(existing);
+      if (meta.ptn !== ptn) return { ok: false, error: 'เวชระเบียนนี้เป็นของคนไข้คนอื่น' };
+      if (meta.status === 'final') status = 'final';
+      meta.date = date; meta.status = status; meta.updatedAt = nowIso; meta.updatedBy = auth.username;
+      rowIndex = existing._row;
+      updated = true;
+    } else {
+      id = Utilities.getUuid();
+      const mine = rows.filter(r => normText_(r.ptn) === ptn);
+      session = mine.reduce((m, r) => Math.max(m, recNum_(r.session) || 0), 0) + 1;
+      meta = { id: id, ptn: ptn, session: session, kind: 'initial', date: date, status: status, createdAt: nowIso, createdBy: auth.username, updatedAt: '', updatedBy: '' };
+      rowIndex = sheet.getLastRow() + 1;
+    }
+    session = meta.session;
+    const headers = recAddColumns_(sheet, RECORD_META_HEADERS.concat(Object.keys(data)));
+    recEnsureGrid_(sheet, rowIndex, headers.length);
+    const values = headers.map(h => {
+      if (RECORD_META_HEADERS.indexOf(h) !== -1) return String(meta[h] === undefined || meta[h] === null ? '' : meta[h]);
+      return data[h] !== undefined ? data[h] : '';
+    });
+    sheet.getRange(rowIndex, 1, 1, headers.length).setNumberFormat('@').setValues([values]);
+    recordLearnOptions_(payload.learn);
+    SpreadsheetApp.flush();
+  } finally {
+    lock.releaseLock();
+    invalidateCache_(SHEET_RECORDS);
+  }
+  return { ok: true, data: { id: id, session: session, status: status, updated: updated } };
+}
+
+/** ลบเวชระเบียน — ลบได้เฉพาะฉบับร่าง (ฉบับที่บันทึกแล้วแก้ไขได้แต่ลบจากหน้าเว็บไม่ได้) */
+function deleteRecord_(payload) {
+  const id = normText_(payload.id);
+  const sheet = recSheet_(SHEET_RECORDS);
+  if (!id || !sheet) return { ok: false, error: 'ไม่พบเวชระเบียนนี้' };
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    invalidateCache_(SHEET_RECORDS);
+    const row = sheetData_(SHEET_RECORDS).find(r => normText_(r.id) === id);
+    if (!row) return { ok: false, error: 'ไม่พบเวชระเบียนนี้ (อาจถูกลบไปแล้ว)' };
+    if (normText_(row.status) === 'final') return { ok: false, error: 'ลบได้เฉพาะฉบับร่าง เวชระเบียนที่บันทึกแล้วลบจากหน้าเว็บไม่ได้' };
+    sheet.deleteRow(row._row);
+    SpreadsheetApp.flush();
+  } finally {
+    lock.releaseLock();
+    invalidateCache_(SHEET_RECORDS);
+  }
+  return { ok: true };
+}
+
 /* ---------------------------- ความพึงพอใจ (แบบประเมิน Google Form ไม่ระบุตัวตน) ---------------------------- */
 // คนไข้ตอบแบบประเมินผ่านลิงก์/QR ของ Google Form เมื่อไหร่ก็ได้ ไม่มีชื่อ ไม่ผูกกับนัดหรือ PTN
 // ฟอร์มถูก "ลิงก์ไปยังชีต" มาที่สเปรดชีตนี้ (Google สร้างแท็บคำตอบให้เอง) ระบบแค่อ่านแท็บนั้นมาสรุปตามช่วงเวลาที่กรอง
@@ -2011,7 +2497,8 @@ function setupSatisfactionForm() {
 }
 
 const SYSTEM_SHEETS_ = [SHEET_USERS, SHEET_SCHEDULE, SHEET_SCHEDULE_SLOTS, SHEET_CLOSED, SHEET_BUSY, SHEET_APPTS, SHEET_CLINIC_TYPES,
-  SHEET_CLINIC_DAYS, SHEET_CLINIC_RULES, SHEET_SPECIAL_OPEN, SHEET_SPECIAL_SLOTS, SHEET_ICD10, SHEET_ICD9, SHEET_EXTRA_SLOTS, SHEET_BUSY_RULES, SHEET_PATIENTS];
+  SHEET_CLINIC_DAYS, SHEET_CLINIC_RULES, SHEET_SPECIAL_OPEN, SHEET_SPECIAL_SLOTS, SHEET_ICD10, SHEET_ICD9, SHEET_EXTRA_SLOTS, SHEET_BUSY_RULES, SHEET_PATIENTS,
+  'Records', 'RecordOptions', 'AssessTests', 'AssessNorms'];
 
 /** หาแท็บคำตอบของแบบประเมิน: แท็บที่ลิงก์กับ Google Form (หรือแท็บที่หัวคอลัมน์แรกเป็น "ประทับเวลา"/"Timestamp") */
 function findFeedbackSheet_() {

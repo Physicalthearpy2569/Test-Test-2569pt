@@ -1,0 +1,672 @@
+/* ============================================================================
+ * เวชระเบียน: แบบประเมินครั้งแรกของแต่ละ session (5 ชุด ตามแบบฟอร์มเดิมในชีต)
+ * ใช้ของจาก app.js: api(), state, esc_(), toast(), showView_(), fmtThaiDate_(), todayYmd_(), logout()
+ *
+ * ช่องในแบบฟอร์มกำหนดที่ไฟล์นี้ (data-k = ชื่อคอลัมน์ในชีต Records) — เพิ่มช่องใหม่ที่นี่ได้เลย หลังบ้านเพิ่มคอลัมน์ให้เอง
+ * ตัวเลือกดรอปดาวน์มาจากชีต RecordOptions (ชื่อรายการ = ชื่อคอลัมน์) รายการทดสอบ/เกณฑ์มาจากชีต AssessTests และ AssessNorms
+ * ========================================================================== */
+
+const REC = {
+  setup: null,      // { options, tests, norms } จากหลังบ้าน
+  patient: null,    // คนไข้ของแบบฟอร์มที่เปิดอยู่
+  meta: null,       // { id, session, status, date, ... } ของชุดที่เปิดอยู่ (id ว่าง = ยังไม่เคยบันทึก)
+  dirty: false,     // มีการแก้ไขที่ยังไม่ได้บันทึก
+  autoDec: '',      // ข้อความ Decrease performance ที่ระบบเติมให้ล่าสุด (ใช้ดูว่าผู้ใช้แก้เองหรือยัง)
+  saving: false
+};
+const REC_MONTHS = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
+const REC_OTHER = '__other__';
+
+/* ---------------- ตัวช่วยสร้างช่องกรอก ---------------- */
+
+const recAttr_ = s => esc_(String(s === undefined || s === null ? '' : s));
+/** ดรอปดาวน์ที่เลือก "พิมพ์เอง…" ได้ — list = ชื่อรายการในชีต RecordOptions, ph = ข้อความบอกว่าช่องนี้คืออะไร */
+function rDD(key, list, ph, cls) {
+  const opts = ((REC.setup && REC.setup.options[list]) || []).map(o => `<option value="${recAttr_(o)}">${esc_(o)}</option>`).join('');
+  return `<select data-k="${key}" data-list="${list}" class="rec-dd ${cls || 'm'}" aria-label="${recAttr_(ph)}"><option value="">${esc_(ph || 'เลือก')}</option>${opts}<option value="${REC_OTHER}">พิมพ์เอง…</option></select>`;
+}
+const rT = (key, ph, cls) => `<input type="text" data-k="${key}" class="${cls || 'm'}" placeholder="${recAttr_(ph)}" aria-label="${recAttr_(ph)}" maxlength="500">`;
+const rTA = (key, ph) => `<textarea data-k="${key}" class="x" rows="2" placeholder="${recAttr_(ph)}" aria-label="${recAttr_(ph)}" maxlength="1000"></textarea>`;
+const rNum = (key, label) => `<input type="number" data-k="${key}" class="s" inputmode="decimal" step="any" min="0" aria-label="${recAttr_(label)}">`;
+const rTx = s => `<span class="tx">${s}</span>`;
+const rCk = (key, label, cls) => `<label class="ck ${cls || ''}"><input type="checkbox" data-k="${key}">${label}</label>`;
+/** ตัวเลือกแบบเลือกได้อย่างเดียว (เช่น None / Yes) — เก็บค่าเป็นคำเดียวในช่อง key กดซ้ำเพื่อยกเลิก */
+const rPair = (key, items) => items.map(it => `<label class="ck ${it[2] || ''}"><input type="checkbox" data-pair="${key}" value="${it[0]}">${it[1]}</label>`).join('');
+const rNY = key => rPair(key, [['none', 'None'], ['yes', 'Yes', 'warn']]);
+const rNrs = (key, label) => `<span class="rec-nrs" data-nrs="${key}" role="group" aria-label="${recAttr_(label)}">${[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(i => `<button type="button" data-v="${i}">${i}</button>`).join('')}</span>`;
+const rRow = (label, ...c) => `<div class="rec-row"><span class="lb">${label}</span>${c.join('')}</div>`;
+/** แถวที่ขึ้นต้นด้วยช่องติ๊ก — เลือก/กรอกช่องใดในแถว ระบบติ๊กให้เอง */
+const rCRow = (key, label, ...c) => `<div class="rec-row" data-lead="${key}">${rCk(key, label, 'lead')}${c.join('')}</div>`;
+const rNYRow = (key, label, ...c) => `<div class="rec-row" data-ny="${key}"><span class="lb">${label}</span>${rNY(key)}${c.join('')}</div>`;
+/** กลุ่มช่องที่ต้องอยู่ด้วยกัน: จอแคบขึ้นบรรทัดใหม่พร้อมกันทั้งกลุ่ม */
+const rGrp = inner => `<span class="rec-grp">${inner}</span>`;
+const rSub = s => `<div class="rec-sub">${s}</div>`;
+const rCard = (n, title, body) => `<section class="rec-card" id="recPart${n}"><h3><span class="n">${n}</span>${title}</h3>${body}</section>`;
+
+/* ---------------- แบบฟอร์ม 5 ชุด ---------------- */
+
+function recPart1_() {
+  return rCard(1, 'Personal Data', [
+    rRow('Chief complaint', rT('p1_cc', 'อาการสำคัญ', 'x')),
+    rRow('Present history', rTA('p1_ph', 'ประวัติปัจจุบัน')),
+    rSub('Past history'),
+    rRow('U/D', rDD('p1_ud1', 'ud', 'โรคประจำตัว 1'), rDD('p1_ud2', 'ud', 'โรคประจำตัว 2'), rDD('p1_ud3', 'ud', 'โรคประจำตัว 3'), rT('p1_ud_note', 'อื่น ๆ / รายละเอียด', 'x')),
+    rRow('Accident', rDD('p1_acc', 'yesNo', 'Yes / No', 's'), rT('p1_acc_note', 'รายละเอียด', 'x')),
+    rNYRow('p1_fall', 'Falling history', rT('p1_fall_note', 'รายละเอียด (ถ้ามี)', 'x')),
+    rSub('Precaution / Contraindication / Flags'),
+    rNYRow('p1_prec', 'Precaution', rT('p1_prec_note', 'รายละเอียด (ถ้ามี)', 'x')),
+    rNYRow('p1_contra', 'Contraindication', rDD('p1_contra1', 'contraindication', 'ข้อห้าม', 'l')),
+    rNYRow('p1_red', 'Red flag', rDD('p1_red1', 'redFlag', 'Red flag 1', 'l'), rDD('p1_red2', 'redFlag', 'Red flag 2', 'l')),
+    rNYRow('p1_orange', 'Orange flag', rDD('p1_orange1', 'orangeFlag', 'Orange flag', 'l')),
+    rNYRow('p1_yellow', 'Yellow flag', rDD('p1_yellow1', 'yellowFlag', 'Yellow flag 1', 'l'), rDD('p1_yellow2', 'yellowFlag', 'Yellow flag 2', 'l')),
+    rSub('Diagnosis'),
+    rRow('Medical diagnosis', rDD('p1_mdx1', 'medicalDx', 'การวินิจฉัย 1'), rDD('p1_mdx2', 'medicalDx', 'การวินิจฉัย 2'), rDD('p1_mdx3', 'medicalDx', 'การวินิจฉัย 3'), rDD('p1_mdx4', 'medicalDx', 'การวินิจฉัย 4')),
+    rRow('PT diagnosis', rDD('p1_ptdx', 'ptDx', 'Physical therapy diagnosis', 'l'))
+  ].join(''));
+}
+
+function recTestRows_() {
+  const tests = (REC.setup && REC.setup.tests) || [];
+  const groups = [];
+  tests.forEach(t => { if (groups.indexOf(t.group) === -1) groups.push(t.group); });
+  return groups.map(g => rSub('Performance test · ' + esc_(g)) + tests.filter(t => t.group === g).map(t => `
+    <div class="rec-row rec-test" data-test="${recAttr_(t.key)}">
+      <span class="lb">${esc_(t.name)}</span>
+      ${t.askName ? `<input type="text" data-k="pt_${t.key}_label" class="m" placeholder="ชื่อแบบสอบถาม" aria-label="ชื่อแบบสอบถาม" maxlength="80">` : ''}
+      ${rNum('pt_' + t.key, t.name)}${rTx(esc_(t.unit))}
+      <span class="rec-crit" data-crit="${recAttr_(t.key)}"></span>
+    </div>`).join('')).join('');
+}
+
+function recPart2_() {
+  return rCard(2, 'Physical Examination', [
+    rRow('เวลาที่ตรวจ', `<input type="time" data-k="p2_time" class="s2" aria-label="เวลาที่ตรวจ">`),
+    rSub('Behavior of symptoms'),
+    rRow('อาการ', rDD('p2_sym', 'symptom', 'อาการ'), rTx('of'), rDD('p2_sym_at', 'bodyPart', 'ตำแหน่ง')),
+    rRow('NRS · Rest', rNrs('p2_nrs_rest', 'NRS ขณะพัก')),
+    rRow('NRS · Function', rNrs('p2_nrs_func', 'NRS ขณะใช้งาน')),
+    rRow('Frequency', rDD('p2_freq', 'frequency', 'ความถี่')),
+    rRow('Aggravate', rT('p2_agg', 'สิ่งที่ทำให้อาการมากขึ้น', 'x')),
+    rRow('Ease', rDD('p2_ease', 'ease', 'สิ่งที่ทำให้อาการลดลง')),
+    rSub('Posture'),
+    `<div class="rec-row"><span class="lb">Posture</span>${rPair('p2_post', [['normal', 'Normal'], ['incorrect', 'Incorrect', 'warn']])}</div>`,
+    `<div class="rec-row" data-pairset="p2_post:incorrect"><span class="lb"></span>${rCk('p2_post_fhp', 'Forward head')}${rCk('p2_post_rs', 'Round shoulder')}${rCk('p2_post_ws', 'Winged scapula')}${rCk('p2_post_chin', 'Chin out')}${rCk('p2_post_kyphosis', 'Thoracic kyphosis')}</div>`,
+    rSub('Tenderness / ROM'),
+    rNYRow('p2_tender', 'Tenderness', rDD('p2_tender_side', 'side', 'ข้าง', 's'), rDD('p2_tender_at', 'bodyPart', 'ตำแหน่ง'), rDD('p2_tender_muscle', 'muscle', 'กล้ามเนื้อ/โครงสร้าง')),
+    `<div class="rec-row" data-pairset="p2_rom:limit"><span class="lb">ROM</span>${rPair('p2_rom', [['full', 'Full all direction'], ['limit', 'Limit at', 'warn']])}${rDD('p2_rom_side', 'side', 'ข้าง', 's')}${rDD('p2_rom_joint', 'joint', 'ข้อ')}${rDD('p2_rom_dir', 'direction', 'ทิศทาง')}</div>`,
+    rSub('Special test'),
+    rCRow('p2_st_upper', 'Shoulder / upper', rDD('p2_st_upper_test', 'specialTestUpper', 'ชื่อการทดสอบ', 'l'), rDD('p2_st_upper_res', 'testResult', 'ผล', 's')),
+    rCRow('p2_st_lower', 'Lumbar / lower', rDD('p2_st_lower_test', 'specialTestLower', 'ชื่อการทดสอบ', 'l'), rDD('p2_st_lower_res', 'testResult', 'ผล', 's')),
+    rCRow('p2_st_other', 'อื่น ๆ', rT('p2_st_other_note', 'ชื่อการทดสอบและผล', 'x')),
+    recTestRows_()
+  ].join(''));
+}
+
+function recPart3_() {
+  return rCard(3, 'Problem list (localize)', [
+    rCRow('p3_pain', 'Pain at', rDD('p3_pain_side', 'side', 'ข้าง', 's'), rDD('p3_pain_at', 'bodyPart', 'ตำแหน่ง'), rDD('p3_pain_muscle', 'muscle', 'ส่วน/กล้ามเนื้อ')),
+    rCRow('p3_rom', 'ROM limited', rDD('p3_rom_joint', 'joint', 'ข้อ'), rDD('p3_rom_dir', 'direction', 'ทิศทาง')),
+    rCRow('p3_imb', 'Muscle imbalance', rTx('of'), rDD('p3_imb_muscle', 'muscle', 'กล้ามเนื้อ/ส่วน')),
+    rCRow('p3_numb', 'Numbness', rDD('p3_numb_side', 'side', 'ข้าง', 's'), rDD('p3_numb_at', 'bodyPart', 'ตำแหน่ง')),
+    rCRow('p3_amb', 'Poor ambulation'),
+    `<div class="rec-row" data-lead="p3_decPerf">${rCk('p3_decPerf', 'Decrease performance', 'lead')}
+      <textarea data-k="p3_decPerf_detail" class="x" rows="2" placeholder="ระบบเติมรายการทดสอบที่ต่ำกว่าเกณฑ์ให้เอง แก้ไขได้" aria-label="รายละเอียด Decrease performance" maxlength="1000"></textarea>
+      <button type="button" class="secondary rec-mini" id="recDecRefill" title="เติมใหม่จากผลทดสอบในชุดที่ 2">↻ ดึงจากผลทดสอบ</button></div>`,
+    rCRow('p3_other', 'Others', rT('p3_other_note', 'ระบุ', 'x')),
+    rCRow('p3_hcm', 'Healthcare management')
+  ].join(''));
+}
+
+function recPart4_() {
+  return rCard(4, 'Plan of treatment &amp; Goal', [
+    rSub('Plan of treatment'),
+    `<div class="rec-row">${[['ex', 'Exercise'], ['mod', 'Modality'], ['hp', 'Health promotion'], ['nerve', 'Nerve mobilization'], ['amb', 'Ambulation/transfer training'], ['bal', 'Balance training'], ['home', 'Home program']].map(x => rCk('p4_plan_' + x[0], x[1])).join('')}</div>`,
+    rCRow('p4_plan_other', 'อื่น ๆ', rT('p4_plan_other_note', 'ระบุ', 'x')),
+    rSub('Short term goal'),
+    rCRow('p4_stg_pain', 'Relieve pain within', rDD('p4_stg_pain_n', 'count', 'จำนวน', 's'), rTx('visit')),
+    rCRow('p4_stg_follow', 'ปฏิบัติตามที่นักกายภาพสอนได้อย่างถูกต้อง ภายใน', rDD('p4_stg_follow_n', 'count', 'จำนวน', 's'), rTx('visit')),
+    rCRow('p4_stg_other', 'อื่น ๆ', rT('p4_stg_other_note', 'ระบุ', 'x')),
+    rSub('Long term goal'),
+    rCRow('p4_ltg_perf', 'Increase physical performance'),
+    rCRow('p4_ltg_qol', 'Increase QOL'),
+    rCRow('p4_ltg_rtf', 'Return to function', rDD('p4_ltg_rtf_what', 'functionGoal', 'กิจกรรม/หน้าที่', 'l'), rDD('p4_ltg_rtf_n', 'count', 'จำนวน', 's'), rDD('p4_ltg_rtf_unit', 'timeUnit', 'หน่วยเวลา', 's')),
+    rCRow('p4_ltg_hcm', 'Improve skills for healthcare management', rDD('p4_ltg_hcm_n', 'count', 'จำนวน', 's'), rDD('p4_ltg_hcm_unit', 'timeUnit', 'หน่วยเวลา', 's'))
+  ].join(''));
+}
+
+const REC_MODALITIES = [['us', 'US', 1], ['usc', 'US Combine', 1], ['es', 'ES', 1], ['pms', 'PMS', 1], ['ctx', 'C-Traction', 1], ['ltx', 'L-Traction', 1], ['hot', 'Hot/Cool', 1],
+  ['swr', 'Shock wave Radial'], ['swf', 'Shock wave Focus'], ['laser', 'LASER'], ['swd', 'SWD'], ['nerve', 'Nerve mobilization'], ['mob', 'Mobilization', 2], ['manual', 'Manual technique']];
+const REC_EXERCISES = [['stretch', 'Stretching exs.'], ['strength', 'Strengthening exs.'], ['iso', 'Isometric exs.'], ['core', 'Core stabilization exs.'], ['cardio', 'Cardiovascular endurance']];
+
+function recPart5_() {
+  const mod = m => {
+    const k = 'p5_' + m[0];
+    let extra = '';
+    if (m[2] === 1) extra = rGrp(rDD(k + '_a', 'modParam1', 'ค่า 1', 's') + rDD(k + '_b', 'modParam2', 'ค่า 2', 's') + rTx('Intensity/parameter') + rDD(k + '_mode', 'modMode', 'โหมด/ค่า', 's'));
+    if (m[2] === 2) extra = rGrp(rDD(k + '_tech', 'mobTechnique', 'เทคนิค', 's') + rDD(k + '_grade', 'mobGrade', 'Grade', 's') + rDD(k + '_dir', 'direction', 'ทิศทาง', 's'));
+    return rCRow(k, m[1], rTx('AT'), rDD(k + '_side', 'side', 'ข้าง', 's'), rDD(k + '_at', 'bodyPart', 'ตำแหน่ง'), rTx('OF'), rDD(k + '_of', 'muscle', 'ส่วน/กล้ามเนื้อ'), extra);
+  };
+  const exs = e => {
+    const k = 'p5_ex_' + e[0];
+    return `<div class="rec-row" data-lead="${k}" data-exs="1">${rCk(k, e[1], 'lead')}${rTx('OF')}${rDD(k + '_side', 'side', 'ข้าง', 's')}${rDD(k + '_part', 'muscle', 'ส่วน/กล้ามเนื้อ')}${rDD(k + '_detail', 'exDetail', 'รายละเอียด', 's')}
+      ${rGrp(rDD(k + '_reps', 'reps', 'ครั้ง', 's') + rTx('ครั้ง/sets') + rDD(k + '_sets', 'setsPerDay', 'sets', 's') + rTx('sets/days') + rDD(k + '_days', 'daysPerWeek', 'วัน', 's') + rTx('days/weeks'))}</div>`;
+  };
+  return rCard(5, 'Intervention', [
+    rSub('Modality / Manual'),
+    REC_MODALITIES.map(mod).join(''),
+    rSub('Exercise'),
+    REC_EXERCISES.map(exs).join(''),
+    rCRow('p5_bal', 'Balance training'),
+    rCRow('p5_amb', 'Ambulation training', rDD('p5_amb_pattern', 'gaitPattern', 'รูปแบบการเดิน'), rTx('with'), rDD('p5_amb_aid', 'gaitAid', 'อุปกรณ์ช่วยเดิน')),
+    rCRow('p5_other', 'อื่น ๆ', rT('p5_other_note', 'ระบุ', 'x')),
+    rSub('Behavior'),
+    rCRow('p5_behav', 'ปรับพฤติกรรม', rTx('all times')),
+    rCRow('p5_pa', 'Increase PA', rDD('p5_pa_min', 'paMinutes', 'นาที', 's'), rTx('นาที/วัน'), rDD('p5_pa_days', 'paDays', 'วัน', 's'), rTx('วัน/สัปดาห์'))
+  ].join(''));
+}
+
+/* ---------------- อ่าน/เติมค่าในแบบฟอร์ม ---------------- */
+
+function recBody_() { return document.getElementById('recordBody'); }
+
+/** เพิ่มตัวเลือกให้ดรอปดาวน์ทุกช่องที่ใช้รายการเดียวกัน (ค่าที่พิมพ์เองใช้ต่อในแถวอื่นได้ทันที) */
+function recAddOption_(list, value, isNew) {
+  if (!value) return;
+  const opts = REC.setup.options[list] || (REC.setup.options[list] = []);
+  if (opts.indexOf(value) === -1) opts.push(value);
+  recBody_().querySelectorAll(`select[data-list="${list}"]`).forEach(sel => {
+    if (Array.from(sel.options).some(o => o.value === value)) return;
+    const o = document.createElement('option');
+    o.value = value; o.textContent = value;
+    if (isNew) o.dataset.isNew = '1';
+    sel.insertBefore(o, sel.querySelector(`option[value="${REC_OTHER}"]`));
+  });
+}
+
+/** ขยายความสูงกล่องข้อความให้พอดีเนื้อหา (ไม่ต้องเลื่อนอ่านในกล่องเล็ก) */
+function recGrow_(el) {
+  if (!el || el.tagName !== 'TEXTAREA') return;
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight + 2, 320) + 'px';
+}
+
+function recSetField_(el, value) {
+  const v = value === undefined || value === null ? '' : String(value);
+  if (el.type === 'checkbox') { el.checked = v === 'Y' || v === 'true'; return; }
+  if (el.tagName === 'SELECT') {
+    if (v && !Array.from(el.options).some(o => o.value === v)) recAddOption_(el.dataset.list, v, false);
+    el.value = v;
+    el.dataset.prev = v;
+    return;
+  }
+  el.value = v;
+  recGrow_(el);
+}
+
+function recFill_(data) {
+  const body = recBody_();
+  body.querySelectorAll('[data-k]').forEach(el => recSetField_(el, data[el.dataset.k]));
+  body.querySelectorAll('[data-pair]').forEach(el => { el.checked = String(data[el.dataset.pair] || '') === el.value; });
+  body.querySelectorAll('[data-nrs]').forEach(g => {
+    const v = data[g.dataset.nrs];
+    g.querySelectorAll('button').forEach(b => b.classList.toggle('on', v !== undefined && v !== '' && String(v) === b.dataset.v));
+  });
+}
+
+function recCollect_() {
+  const body = recBody_();
+  const data = {};
+  body.querySelectorAll('[data-k]').forEach(el => {
+    const k = el.dataset.k;
+    if (el.type === 'checkbox') { if (el.checked) data[k] = true; return; }
+    const v = (el.value || '').trim();
+    if (v && v !== REC_OTHER) data[k] = v;
+  });
+  body.querySelectorAll('[data-pair]').forEach(el => { if (el.checked) data[el.dataset.pair] = el.value; });
+  body.querySelectorAll('[data-nrs]').forEach(g => {
+    const on = g.querySelector('button.on');
+    if (on) data[g.dataset.nrs] = on.dataset.v;
+  });
+  return data;
+}
+
+/** ค่าที่ผู้ใช้พิมพ์เองในรอบนี้และยังถูกเลือกอยู่ — ส่งให้หลังบ้านจำเข้ารายการตัวเลือก */
+function recLearn_() {
+  const learn = {};
+  recBody_().querySelectorAll('select[data-list]').forEach(sel => {
+    const o = sel.selectedOptions[0];
+    if (!o || !o.dataset.isNew) return;
+    const list = sel.dataset.list;
+    if (!learn[list]) learn[list] = [];
+    if (learn[list].indexOf(o.value) === -1) learn[list].push(o.value);
+  });
+  return learn;
+}
+
+/* ---------------- อายุ เพศ และเกณฑ์ของผลทดสอบ ---------------- */
+
+/** วันเกิดจากช่อง วัน/เดือน/ปี พ.ศ. → 'yyyy-MM-dd' · '' = ไม่ได้กรอก · null = กรอกไม่ครบหรือไม่ถูกต้อง */
+function recBirthDate_() {
+  const d = document.getElementById('recBirthDay').value.trim();
+  const m = document.getElementById('recBirthMonth').value;
+  const y = document.getElementById('recBirthYear').value.trim();
+  if (!d && !m && !y) return '';
+  const dd = Number(d), mm = Number(m), be = Number(y);
+  if (!dd || !mm || !be || be < 2400 || be > 2700) return null;
+  const iso = `${be - 543}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+  const dt = new Date(iso + 'T00:00:00Z');
+  if (isNaN(dt) || dt.toISOString().slice(0, 10) !== iso || iso > todayYmd_()) return null;
+  return iso;
+}
+function recAgeAt_(birth, at) {
+  if (!birth || !at) return null;
+  let age = Number(at.slice(0, 4)) - Number(birth.slice(0, 4));
+  if (at.slice(5) < birth.slice(5)) age--;
+  return age >= 0 && age < 130 ? age : null;
+}
+/** อายุ ณ วันที่ประเมิน: จากวันเกิดถ้ากรอกครบ ไม่งั้นใช้อายุที่พิมพ์เอง */
+function recAge_() {
+  const birth = recBirthDate_();
+  const date = document.getElementById('recDate').value;
+  if (birth) return recAgeAt_(birth, date);
+  const typed = document.getElementById('recAgeTyped').value.trim();
+  const n = Number(typed);
+  return typed !== '' && isFinite(n) && n >= 0 && n < 130 ? Math.floor(n) : null;
+}
+const recSex_ = () => document.getElementById('recSex').value;
+
+/**
+ * เกณฑ์ของรายการทดสอบสำหรับคนไข้คนนี้ — คืน null เมื่อรายการนั้นยังไม่มีเกณฑ์
+ * อายุอยู่ในตารางค่าปกติและรู้เพศ: ใช้ตารางตามอายุ/เพศ · กรณีอื่น: ใช้เกณฑ์ค่าเดียวของรายการ (riskBelow / riskAbove)
+ */
+function recCriterion_(test, age, sex) {
+  const fmt = n => String(Math.round(n * 100) / 100);
+  if (age !== null && sex) {
+    const norm = ((REC.setup && REC.setup.norms) || []).find(n => n.testKey === test.key && n.sex === sex && age >= n.ageFrom && age <= n.ageTo);
+    if (norm) {
+      const nums = [norm.normalLow, norm.normalHigh].filter(v => v !== null && v !== undefined);
+      const basis = `${sex === 'M' ? 'ชาย' : 'หญิง'} ${norm.ageFrom}-${norm.ageTo} ปี`;
+      if (test.better === 'lower') { const max = Math.max.apply(null, nums); return { text: 'ไม่เกิน ' + fmt(max), basis: basis, below: v => v > max }; }
+      const min = Math.min.apply(null, nums);
+      return { text: 'ตั้งแต่ ' + fmt(min), basis: basis, below: v => v < min };
+    }
+  }
+  if (test.riskBelow !== null && test.riskBelow !== undefined) return { text: 'ตั้งแต่ ' + fmt(test.riskBelow), basis: '', below: v => v < test.riskBelow };
+  if (test.riskAbove !== null && test.riskAbove !== undefined) return { text: 'ไม่เกิน ' + fmt(test.riskAbove), basis: '', below: v => v > test.riskAbove };
+  return null;
+}
+
+/** อัปเดตป้ายเกณฑ์ข้างผลทดสอบแต่ละรายการ และคืนข้อความของรายการที่ต่ำกว่าเกณฑ์ (1 บรรทัดต่อรายการ) */
+function recEvaluateTests_() {
+  const body = recBody_();
+  const age = recAge_(), sex = recSex_();
+  const lines = [];
+  ((REC.setup && REC.setup.tests) || []).forEach(t => {
+    const input = body.querySelector(`[data-k="pt_${t.key}"]`);
+    const tag = body.querySelector(`[data-crit="${t.key}"]`);
+    if (!input || !tag) return;
+    const crit = recCriterion_(t, age, sex);
+    const raw = input.value.trim();
+    const v = raw === '' ? null : Number(raw);
+    const critText = crit ? `เกณฑ์ ${crit.text} ${t.unit}${crit.basis ? ' (' + crit.basis + ')' : ''}` : '';
+    tag.className = 'rec-crit';
+    if (!crit) { tag.textContent = v !== null ? 'ยังไม่มีเกณฑ์' : ''; return; }
+    if (v === null || !isFinite(v)) { tag.textContent = critText; return; }
+    if (crit.below(v)) {
+      tag.classList.add('bad');
+      tag.textContent = `ต่ำกว่าเกณฑ์ · ${critText}${t.interpret ? ' · ' + t.interpret : ''}`;
+      lines.push(`${t.name} ${raw} ${t.unit} (${critText})${t.interpret ? ': ' + t.interpret : ''}`);
+    } else {
+      tag.classList.add('good');
+      tag.textContent = `ผ่านเกณฑ์ · ${critText}`;
+    }
+  });
+  return lines.join('\n');
+}
+
+/**
+ * Decrease performance (ชุดที่ 3): เติมรายการที่ต่ำกว่าเกณฑ์ให้เอง
+ * ถ้าผู้ใช้แก้ข้อความเองแล้วจะไม่เขียนทับ จนกว่าจะกด "ดึงจากผลทดสอบ" (force)
+ */
+function recSyncDecPerf_(force) {
+  const body = recBody_();
+  const text = recEvaluateTests_();
+  const detail = body.querySelector('[data-k="p3_decPerf_detail"]');
+  const box = body.querySelector('[data-k="p3_decPerf"]');
+  if (!detail || !box) return;
+  const untouched = detail.value.trim() === '' || detail.value.trim() === REC.autoDec.trim();
+  if (force || untouched) {
+    const hadAuto = REC.autoDec.trim() !== '' && detail.value.trim() === REC.autoDec.trim();
+    detail.value = text;
+    recGrow_(detail);
+    if (text) box.checked = true;
+    else if (hadAuto || force) box.checked = false;
+  }
+  REC.autoDec = text;
+}
+
+function recUpdateAge_() {
+  const birth = recBirthDate_();
+  const out = document.getElementById('recAgeAuto');
+  const typed = document.getElementById('recAgeTypedWrap');
+  const err = document.getElementById('recBirthError');
+  err.textContent = birth === null ? 'วันเกิดไม่ถูกต้องหรือกรอกไม่ครบ (วัน เดือน ปี พ.ศ.)' : '';
+  if (birth) {
+    const age = recAgeAt_(birth, document.getElementById('recDate').value);
+    out.textContent = age !== null ? `${age} ปี` : '-';
+    out.classList.remove('hidden'); typed.classList.add('hidden');
+  } else {
+    out.classList.add('hidden'); typed.classList.remove('hidden');
+  }
+}
+
+/* ---------------- เปิดแบบฟอร์ม ---------------- */
+
+function recStatusLabel_(status) {
+  return status === 'final' ? '<span class="badge attended-tag">บันทึกแล้ว</span>' : '<span class="badge special-tag">ฉบับร่าง</span>';
+}
+
+/**
+ * เปิดแบบฟอร์ม — opts: { ptn, id } แก้ไขชุดเดิม หรือ { ptn, date } เปิด session ใหม่ (ยังไม่บันทึกจนกว่าจะกดปุ่ม)
+ */
+async function openRecordForm_(opts) {
+  if (!recordLeaveGuard_('record')) return;
+  REC.dirty = false;
+  showView_('record');
+  const body = recBody_();
+  body.innerHTML = '<p class="panel-hint">กำลังเปิดเวชระเบียน...</p>';
+  const calls = [api('getRecordSetup', {})];
+  calls.push(opts.id ? api('getRecord', { id: opts.id }) : api('getPatientRecords', { ptn: opts.ptn }));
+  const [su, rr] = await Promise.all(calls);
+  const fail = !su.ok ? su.error : (!rr.ok ? rr.error : '');
+  if (fail) {
+    body.innerHTML = `<p class="error-text">เปิดเวชระเบียนไม่สำเร็จ: ${esc_(fail)}</p><button type="button" class="secondary" id="recBackBtn">กลับ</button>`;
+    document.getElementById('recBackBtn').addEventListener('click', () => showView_('patients'));
+    return;
+  }
+  REC.setup = su.data;
+  REC.patient = rr.data.patient;
+  const today = rr.data.today || todayYmd_();
+  let data = {};
+  if (opts.id) {
+    const r = rr.data.record;
+    REC.meta = { id: r.id, session: r.session, status: r.status, date: r.date, createdBy: r.createdBy, updatedBy: r.updatedBy, updatedAt: r.updatedAt };
+    data = r.data || {};
+  } else {
+    const nextSession = (rr.data.records || []).reduce((m, r) => Math.max(m, r.session || 0), 0) + 1;
+    const date = opts.date && opts.date <= today ? opts.date : today;
+    REC.meta = { id: '', session: nextSession, status: 'new', date: date };
+    const now = new Date();
+    data = { p2_time: `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}` };
+  }
+  if (!REC.patient) { body.innerHTML = '<p class="error-text">ไม่พบข้อมูลคนไข้ของเวชระเบียนนี้ในทะเบียน</p>'; return; }
+  recRender_(data, today);
+}
+
+function recRender_(data, today) {
+  const p = REC.patient, m = REC.meta;
+  const b = /^\d{4}-\d{2}-\d{2}$/.test(p.birthDate || '') ? p.birthDate : '';
+  const body = recBody_();
+  body.innerHTML = `
+    <div class="rec-head">
+      <div class="rec-head-top">
+        <button type="button" class="secondary rec-mini" id="recBackBtn">‹ กลับหน้าคนไข้</button>
+        <h2>เวชระเบียน · ประเมินครั้งแรก</h2>
+        <span id="recStatus">${m.id ? recStatusLabel_(m.status) : '<span class="badge busy">ยังไม่ได้บันทึก</span>'}</span>
+      </div>
+      <div class="rec-head-info">
+        <span class="kv">PTN <b>${esc_(p.ptn)}</b></span>
+        <span class="kv">ชื่อ <b>${esc_(p.firstName)} ${esc_(p.lastName)}</b></span>
+        <span class="kv">Session <b>ที่ ${esc_(m.session)}</b></span>
+        ${m.updatedBy || m.createdBy ? `<span class="kv">บันทึกล่าสุดโดย <b>${esc_(m.updatedBy || m.createdBy)}</b></span>` : ''}
+      </div>
+      <div class="rec-head-form">
+        <label>วันที่ประเมิน<input type="date" id="recDate" value="${recAttr_(m.date)}" max="${recAttr_(today)}"></label>
+        <label>เพศ<select id="recSex"><option value="">ไม่ระบุ</option><option value="M">ชาย</option><option value="F">หญิง</option></select></label>
+        <label>วันเกิด (วัน / เดือน / ปี พ.ศ.)
+          <span class="rec-birth">
+            <input type="number" id="recBirthDay" min="1" max="31" placeholder="วัน" inputmode="numeric" aria-label="วันเกิด: วันที่" value="${b ? Number(b.slice(8, 10)) : ''}">
+            <select id="recBirthMonth" aria-label="วันเกิด: เดือน"><option value="">เดือน</option>${REC_MONTHS.map((n, i) => `<option value="${i + 1}">${n}</option>`).join('')}</select>
+            <input type="number" id="recBirthYear" min="2400" max="2700" placeholder="ปี พ.ศ." inputmode="numeric" aria-label="วันเกิด: ปี พ.ศ." value="${b ? Number(b.slice(0, 4)) + 543 : ''}">
+          </span>
+        </label>
+        <label>อายุ
+          <span class="rec-age"><b id="recAgeAuto" class="hidden"></b>
+            <span id="recAgeTypedWrap"><input type="number" id="recAgeTyped" data-k="p1_age" min="0" max="129" placeholder="ปี" inputmode="numeric" aria-label="อายุ (ปี)"></span></span>
+        </label>
+      </div>
+      <p class="error-text" id="recBirthError"></p>
+    </div>
+    <nav class="rec-steps" aria-label="ไปยังชุด">
+      ${['Personal Data', 'Physical Examination', 'Problem list', 'Plan & Goal', 'Intervention'].map((s, i) => `<button type="button" data-part="${i + 1}">${i + 1} ${s}</button>`).join('')}
+    </nav>
+    ${recPart1_()}${recPart2_()}${recPart3_()}${recPart4_()}${recPart5_()}
+    <div class="rec-foot">
+      <span class="tx" id="recDirty"></span>
+      <p class="error-text" id="recError"></p>
+      <span class="rec-foot-btns">
+        ${m.status !== 'final' ? '<button type="button" class="secondary" id="recSaveDraftBtn">บันทึกร่าง</button>' : ''}
+        <button type="button" class="primary" id="recSaveFinalBtn">${m.status === 'final' ? 'บันทึกการแก้ไข' : 'บันทึกเวชระเบียน'}</button>
+      </span>
+    </div>`;
+  document.getElementById('recSex').value = p.sex === 'M' || p.sex === 'F' ? p.sex : '';
+  if (b) document.getElementById('recBirthMonth').value = String(Number(b.slice(5, 7)));
+  recFill_(data);
+  recUpdateAge_();
+  // ข้อความ Decrease performance ที่บันทึกไว้: ถ้าตรงกับที่ระบบคำนวณได้ตอนนี้ ถือว่ายังเป็นของระบบ (อัปเดตตามผลทดสอบต่อได้)
+  REC.autoDec = '';
+  const saved = (data.p3_decPerf_detail || '').trim();
+  const nowText = recEvaluateTests_();
+  REC.autoDec = saved === nowText.trim() ? nowText : (saved ? '\u0000' : '');
+  recWire_();
+  recSetDirty_(false);
+  const content = document.querySelector('.content');
+  if (content) content.scrollTop = 0;
+  window.scrollTo(0, 0);
+}
+
+function recSetDirty_(dirty) {
+  REC.dirty = dirty;
+  const el = document.getElementById('recDirty');
+  if (el) el.textContent = dirty ? 'มีการแก้ไขที่ยังไม่ได้บันทึก' : (REC.meta && REC.meta.id ? 'บันทึกแล้ว' : 'ยังไม่ได้บันทึก');
+}
+
+function recWire_() {
+  const body = recBody_();
+  document.getElementById('recBackBtn').addEventListener('click', () => recBackToPatient_());
+  body.querySelectorAll('.rec-steps button').forEach(btn => btn.addEventListener('click', () => {
+    document.getElementById('recPart' + btn.dataset.part).scrollIntoView({ block: 'start', behavior: 'smooth' });
+  }));
+
+  // ดรอปดาวน์: เลือก "พิมพ์เอง…" แล้วถามค่า เพิ่มเป็นตัวเลือกให้ทุกช่องที่ใช้รายการเดียวกัน
+  body.addEventListener('change', e => {
+    const el = e.target;
+    if (el.tagName === 'SELECT' && el.dataset.list) {
+      if (el.value === REC_OTHER) {
+        const typed = (window.prompt(`พิมพ์ค่าที่ต้องการ (${el.options[0].textContent})`) || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+        if (typed) { recAddOption_(el.dataset.list, typed, true); el.value = typed; }
+        else el.value = el.dataset.prev || '';
+      }
+      el.dataset.prev = el.value;
+    }
+    // ตัวเลือกแบบเลือกได้อย่างเดียว: ติ๊กอันหนึ่ง อีกอันหลุด
+    if (el.dataset && el.dataset.pair && el.checked) {
+      body.querySelectorAll(`[data-pair="${el.dataset.pair}"]`).forEach(o => { if (o !== el) o.checked = false; });
+    }
+    recAutoTick_(el);
+    recSetDirty_(true);
+    document.getElementById('recError').textContent = '';
+    if (el.id === 'recSex' || el.id === 'recBirthMonth' || el.id === 'recDate') { recUpdateAge_(); recSyncDecPerf_(false); }
+  });
+  body.addEventListener('input', e => {
+    const el = e.target;
+    recSetDirty_(true);
+    recGrow_(el);
+    document.getElementById('recError').textContent = '';
+    if (el.id === 'recBirthDay' || el.id === 'recBirthYear' || el.id === 'recAgeTyped') { recUpdateAge_(); recSyncDecPerf_(false); }
+    else if (el.dataset && /^pt_/.test(el.dataset.k || '') && !/_label$/.test(el.dataset.k)) recSyncDecPerf_(false);
+    else if (el.tagName !== 'SELECT' && el.type !== 'checkbox') recAutoTick_(el);
+  });
+  body.querySelectorAll('[data-nrs]').forEach(g => g.addEventListener('click', e => {
+    const btn = e.target.closest('button[data-v]');
+    if (!btn) return;
+    const was = btn.classList.contains('on');
+    g.querySelectorAll('button').forEach(b => b.classList.remove('on'));
+    if (!was) btn.classList.add('on'); // กดซ้ำที่เลขเดิม = ล้างค่า
+    recSetDirty_(true);
+  }));
+  document.getElementById('recDecRefill').addEventListener('click', () => { recSyncDecPerf_(true); recSetDirty_(true); });
+  document.getElementById('recSaveDraftBtn')?.addEventListener('click', () => recSave_('draft'));
+  document.getElementById('recSaveFinalBtn').addEventListener('click', () => recSave_('final'));
+}
+
+/** กรอก/เลือกช่องใดในแถว: ติ๊กช่องนำของแถวนั้นให้ (หรือเลือก Yes / Incorrect / Limit ให้) — ไม่ยุ่งถ้าผู้ใช้ล้างค่า */
+function recAutoTick_(el) {
+  if (!el || !el.closest) return;
+  if (el.type === 'checkbox' && !el.closest('[data-pairset]')) {
+    // ติ๊กแถวการออกกำลังกาย: เติมค่าตั้งต้น ครั้ง/sets/วัน ถ้ายังว่าง
+    const row = el.closest('.rec-row[data-exs]');
+    if (row && el.checked && el.dataset.k === row.dataset.lead) {
+      [['_reps', 'reps'], ['_sets', 'setsPerDay'], ['_days', 'daysPerWeek']].forEach(x => {
+        const sel = row.querySelector(`[data-k="${row.dataset.lead}${x[0]}"]`);
+        const first = (REC.setup.options[x[1]] || [])[0];
+        if (sel && !sel.value && first) { sel.value = first; sel.dataset.prev = first; }
+      });
+    }
+    return;
+  }
+  const hasValue = el.type === 'checkbox' ? el.checked : (el.value || '').trim() !== '' && el.value !== REC_OTHER;
+  if (!hasValue) return;
+  const lead = el.closest('.rec-row[data-lead]');
+  if (lead) {
+    const box = lead.querySelector(`[data-k="${lead.dataset.lead}"]`);
+    if (box && box !== el && !box.checked) { box.checked = true; recAutoTick_(box); }
+  }
+  const ny = el.closest('.rec-row[data-ny]');
+  if (ny && !el.dataset.pair) recSetPair_(ny.dataset.ny, 'yes');
+  const ps = el.closest('.rec-row[data-pairset]');
+  if (ps && !el.dataset.pair) { const x = ps.dataset.pairset.split(':'); recSetPair_(x[0], x[1]); }
+}
+function recSetPair_(key, value) {
+  recBody_().querySelectorAll(`[data-pair="${key}"]`).forEach(o => { o.checked = o.value === value; });
+}
+
+/* ---------------- บันทึก ---------------- */
+
+async function recSave_(status) {
+  if (REC.saving) return;
+  const errEl = document.getElementById('recError');
+  errEl.textContent = '';
+  const birth = recBirthDate_();
+  if (birth === null) { errEl.textContent = 'วันเกิดไม่ถูกต้องหรือกรอกไม่ครบ — แก้ไขหรือลบออกก่อนบันทึก'; document.getElementById('recBirthDay').focus(); return; }
+  const date = document.getElementById('recDate').value;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { errEl.textContent = 'เลือกวันที่ประเมินก่อนบันทึก'; return; }
+  const data = recCollect_();
+  if (birth) delete data.p1_age; // มีวันเกิดแล้ว ไม่ต้องเก็บอายุที่พิมพ์เอง (คำนวณได้เสมอ)
+  if (status === 'final' && !data.p1_cc) {
+    errEl.textContent = 'กรอก Chief complaint ก่อนบันทึกเวชระเบียน (หรือกด บันทึกร่าง ไว้ก่อน)';
+    recBody_().querySelector('[data-k="p1_cc"]').focus();
+    return;
+  }
+  REC.saving = true;
+  const btns = recBody_().querySelectorAll('.rec-foot button');
+  btns.forEach(b => { b.disabled = true; });
+  const res = await api('saveRecord', { id: REC.meta.id || undefined, ptn: REC.patient.ptn, date: date, status: status, data: data,
+    patient: { sex: recSex_(), birthDate: birth }, learn: recLearn_() });
+  REC.saving = false;
+  btns.forEach(b => { b.disabled = false; });
+  if (!res.ok) { errEl.textContent = 'บันทึกไม่สำเร็จ: ' + res.error; return; }
+  REC.meta.id = res.data.id;
+  REC.meta.session = res.data.session;
+  REC.meta.status = res.data.status;
+  REC.patient.sex = recSex_(); REC.patient.birthDate = birth;
+  recBody_().querySelectorAll('option[data-is-new]').forEach(o => { delete o.dataset.isNew; });
+  recSetDirty_(false);
+  if (res.data.status === 'final') {
+    toast('บันทึกเวชระเบียนแล้ว');
+    recBackToPatient_();
+  } else {
+    toast('บันทึกร่างแล้ว');
+    document.getElementById('recStatus').innerHTML = recStatusLabel_('draft');
+  }
+}
+
+/** กลับหน้าคนไข้ของเวชระเบียนที่เปิดอยู่ */
+function recBackToPatient_() {
+  if (!recordLeaveGuard_('patients')) return;
+  REC.dirty = false;
+  const p = REC.patient;
+  showView_('patients');
+  if (p) loadPatientProfile_(p);
+}
+
+/** ถามก่อนออกจากแบบฟอร์มเมื่อมีการแก้ไขที่ยังไม่ได้บันทึก — คืน false = ผู้ใช้ขออยู่ต่อ (app.js เรียกก่อนเปลี่ยนหน้า) */
+function recordLeaveGuard_(nextView) {
+  const open = !document.getElementById('recordView').classList.contains('hidden');
+  if (!open || !REC.dirty) return true;
+  if (window.confirm('มีการแก้ไขเวชระเบียนที่ยังไม่ได้บันทึก ออกจากหน้านี้โดยไม่บันทึกหรือไม่')) { REC.dirty = false; return true; }
+  return false;
+}
+window.addEventListener('beforeunload', e => {
+  if (REC.dirty && !document.getElementById('recordView').classList.contains('hidden')) { e.preventDefault(); e.returnValue = ''; }
+});
+/** ออกจากระบบ: ไม่ทิ้งข้อมูลเวชระเบียนค้างบนจอ */
+function recordReset_() {
+  REC.dirty = false; REC.patient = null; REC.meta = null; REC.setup = null; REC.autoDec = '';
+  const body = recBody_();
+  if (body) body.innerHTML = '';
+}
+
+/* ---------------- รายการเวชระเบียนในหน้าคนไข้ ---------------- */
+
+let _recListReq_ = 0;
+async function loadPatientRecords_(ptn) {
+  const box = document.getElementById('patientRecords');
+  if (!box) return;
+  const req = ++_recListReq_;
+  box.innerHTML = '<h3>เวชระเบียน</h3><p class="dash-sub">กำลังโหลด...</p>';
+  const res = await api('getPatientRecords', { ptn: ptn });
+  if (req !== _recListReq_ || !document.body.contains(box)) return;
+  if (!res.ok) { box.innerHTML = `<h3>เวชระเบียน</h3><p class="error-text">โหลดเวชระเบียนไม่สำเร็จ: ${esc_(res.error)}</p>`; return; }
+  const recs = res.data.records || [];
+  const rows = recs.map(r => `
+    <tr data-id="${recAttr_(r.id)}">
+      <td>Session ${esc_(r.session)}</td><td>${esc_(fmtThaiDate_(r.date))}</td><td>${recStatusLabel_(r.status)}</td>
+      <td>${esc_(r.chiefComplaint || '-')}</td><td>${esc_([r.medicalDx, r.ptDx].filter(Boolean).join(' · ') || '-')}</td>
+      <td class="rec-actions"><button type="button" class="secondary rec-mini" data-open="${recAttr_(r.id)}">เปิด</button>${r.status !== 'final' ? `<button type="button" class="secondary rec-mini rec-del" data-del="${recAttr_(r.id)}">ลบร่าง</button>` : ''}</td>
+    </tr>`).join('');
+  box.innerHTML = `
+    <h3>เวชระเบียน <button type="button" class="secondary rec-mini" id="recNewBtn">+ เปิด session ใหม่ (ประเมินครั้งแรก)</button></h3>
+    <p class="dash-sub">คนไข้ 1 คนใช้ PTN เดิม มาด้วยอาการใหม่ให้เปิด session ใหม่</p>
+    ${rows ? `<div class="table-scroll"><table class="mini-table rec-table">
+      <thead><tr><th>Session</th><th>วันที่ประเมิน</th><th>สถานะ</th><th>Chief complaint</th><th>Diagnosis</th><th></th></tr></thead>
+      <tbody>${rows}</tbody></table></div>` : '<div class="dash-empty">ยังไม่มีเวชระเบียน</div>'}`;
+  document.getElementById('recNewBtn').addEventListener('click', () => {
+    const drafts = recs.filter(r => r.status !== 'final').length;
+    if (drafts && !window.confirm('คนไข้คนนี้มีฉบับร่างค้างอยู่ จะเปิด session ใหม่อีกชุดหรือไม่ (ถ้าจะกรอกต่อ ให้กด เปิด ที่ฉบับร่างเดิม)')) return;
+    openRecordForm_({ ptn: ptn });
+  });
+  box.querySelectorAll('[data-open]').forEach(b => b.addEventListener('click', () => openRecordForm_({ ptn: ptn, id: b.dataset.open })));
+  box.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', async () => {
+    if (!window.confirm('ลบฉบับร่างนี้ใช่ไหม ลบแล้วกู้คืนไม่ได้')) return;
+    b.disabled = true;
+    const del = await api('deleteRecord', { id: b.dataset.del });
+    if (!del.ok) { toast('ลบไม่สำเร็จ: ' + del.error); b.disabled = false; return; }
+    toast('ลบฉบับร่างแล้ว');
+    loadPatientRecords_(ptn);
+  }));
+}
+
+/**
+ * ปุ่ม "เวชระเบียน" ในรายละเอียดนัด: คนไข้ที่ยังไม่มีเวชระเบียนเปิดแบบฟอร์มใหม่เลย (วันที่ = วันนัด)
+ * ถ้ามีแล้วไปหน้าคนไข้ให้เลือกเปิดชุดเดิมหรือเปิด session ใหม่
+ */
+async function openRecordsFromAppt_(appt, date) {
+  if (!appt || !appt.ptn) { toast('นัดนี้ยังไม่มี PTN'); return; }
+  const res = await api('getPatientRecords', { ptn: appt.ptn });
+  if (!res.ok) { toast('เปิดเวชระเบียนไม่สำเร็จ: ' + res.error); return; }
+  if (!(res.data.records || []).length) { openRecordForm_({ ptn: appt.ptn, date: date }); return; }
+  showView_('patients');
+  await loadPatientProfile_(res.data.patient);
+  document.getElementById('patientRecords')?.scrollIntoView({ block: 'start' });
+}

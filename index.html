@@ -6,7 +6,7 @@
 <title>ทดสอบระบบนัดหมายผู้ป่วย รพ.สต.</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600;700&family=Noto+Serif+Thai:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=20261010d" />
+<link rel="stylesheet" href="style.css?v=20261010e" />
 </head>
 <body>
 
@@ -100,6 +100,11 @@
           <p id="patientSearchHint" class="panel-hint" style="margin:8px 0 0;"></p>
         </div>
         <div id="patientProfile"></div>
+      </section>
+
+      <!-- เวชระเบียน: แบบประเมินครั้งแรก (เฉพาะนักกายภาพ — เนื้อหาสร้างโดย record.js) -->
+      <section id="recordView" class="view hidden">
+        <div id="recordBody"></div>
       </section>
 
       <!-- สถิติ (เฉพาะนักกายภาพ) -->
@@ -460,6 +465,7 @@
   <div id="apptDetailModal" class="modal hidden">
     <h3>รายละเอียดนัดหมาย</h3>
     <div id="apptDetailBody" class="detail-body"></div>
+    <button type="button" class="secondary physio-only" id="apptDetailRecordBtn" style="width:100%;margin-bottom:14px;">เวชระเบียนของคนไข้คนนี้</button>
 
     <div class="section-label" style="margin-top:0;">แก้ไขข้อมูลนัด</div>
     <label>ประเภทนัด
@@ -507,6 +513,7 @@
     </div>
   </div>
 
-  <script src="app.js?v=20261010d"></script>
+  <script src="app.js?v=20261010e"></script>
+  <script src="record.js?v=20261010e"></script>
 </body>
 </html>
