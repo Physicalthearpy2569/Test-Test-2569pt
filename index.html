@@ -6,7 +6,7 @@
 <title>ทดสอบระบบนัดหมายผู้ป่วย รพ.สต.</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600;700&family=Noto+Serif+Thai:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=20261008c" />
+<link rel="stylesheet" href="style.css?v=20261009a" />
 </head>
 <body>
 
@@ -296,11 +296,14 @@
       <label>เวลาเริ่ม
         <select id="apptStart"></select>
       </label>
+      <input type="hidden" id="apptPtn" />
+      <div id="apptPatientStatus" class="patient-status hidden"></div>
       <label>ชื่อ
-        <input type="text" id="apptFirstName" required />
+        <input type="text" id="apptFirstName" required autocomplete="off" placeholder="พิมพ์ชื่อเพื่อค้นหาคนไข้เดิม" />
       </label>
+      <div id="apptPatientSuggest" class="patient-suggest hidden"></div>
       <label>นามสกุล
-        <input type="text" id="apptLastName" required />
+        <input type="text" id="apptLastName" required autocomplete="off" />
       </label>
       <label>หมู่
         <input type="text" id="apptMoo" placeholder="เช่น 4" required />
@@ -468,6 +471,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=20261008c"></script>
+  <script src="app.js?v=20261009a"></script>
 </body>
 </html>

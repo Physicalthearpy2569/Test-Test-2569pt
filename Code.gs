@@ -32,6 +32,14 @@ const ICD9_AUTO_CODE = '9339';
 const SHEET_EXTRA_SLOTS = 'ExtraSlots';
 const SHEET_BUSY_RULES = 'BusyRules';
 
+// ทะเบียนคนไข้: 1 คน = 1 แถว = 1 PTN (Physical Therapy Number) ใช้เป็นรหัสหลักผูกนัดทุกครั้งของคนเดียวกันเข้าด้วยกัน
+const SHEET_PATIENTS = 'Patients';
+const PATIENT_HEADERS = ['ptn', 'firstName', 'lastName', 'nationalId', 'phone', 'moo', 'createdAt', 'updatedAt'];
+// รูปแบบ PTN = ตัวอักษรนำหน้า + เลขเรียงลำดับ เช่น PT00001 (มีตัวอักษรนำหน้าเพื่อไม่ให้ Google Sheet แปลงเป็นตัวเลข/วันที่เอง)
+// ถ้าจะเปลี่ยนรูปแบบ ให้เปลี่ยน "ก่อน" รัน setupPatients() ครั้งแรก — ออกเลขไปแล้วไม่ควรเปลี่ยน
+const PTN_PREFIX = 'PT';
+const PTN_DIGITS = 5;
+
 const BUSY_TYPES = ['ประชุม', 'ทำเอกสาร', 'อบรม', 'ลา'];
 const APPT_TYPES = ['OPD', 'ลงชุมชน'];
 
@@ -70,6 +78,7 @@ function setupSheets() {
   ensureSheet_(ss, SHEET_EXTRA_SLOTS, ['id', 'date', 'startTime', 'endTime', 'note']);
   ensureSheet_(ss, SHEET_BUSY_RULES, ['id', 'patternType', 'dayOfMonth', 'weekday', 'nth', 'startTime', 'endTime', 'type', 'note']);
   ensureColumns_(ss.getSheetByName(SHEET_APPTS), ['icd10', 'icd9']); // ชีตเดิมที่ติดตั้งไว้ก่อนหน้า: เพิ่มคอลัมน์ให้อัตโนมัติ
+  ensurePatientInfra_(); // ชีตทะเบียนคนไข้ (Patients) + คอลัมน์ ptn ในชีต Appointments
 
   // รหัสอัตโนมัติเริ่มต้น (แก้ไข/เพิ่ม/ลบเองได้ในหน้า "ตั้งค่า" ภายหลัง — ยกเว้นแถวนี้ที่แนะนำให้เก็บไว้)
   const icd10Sheet = ss.getSheetByName(SHEET_ICD10);
@@ -192,6 +201,7 @@ function route_(action, payload) {
     case 'markAttended': return requirePhysio_(auth, () => markAttended_(payload, auth));
     case 'updateAppointmentIcd': return requirePhysio_(auth, () => updateAppointmentIcd_(payload));
     case 'updateAppointmentInfo': return updateAppointmentInfo_(payload);
+    case 'getPatients': return getPatients_();
 
     case 'getSettingsBundle': return requirePhysio_(auth, () => getSettingsBundle_());
     case 'getSchedule': return requirePhysio_(auth, () => getSchedule_());
@@ -354,6 +364,14 @@ function invalidateCache_(name) {
 function appendRow_(name, obj, headers) {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name);
   sheet.appendRow(headers.map(h => obj[h] !== undefined ? obj[h] : ''));
+  invalidateCache_(name);
+}
+
+/** เพิ่มแถวโดยวางค่าตาม "หัวคอลัมน์จริงในชีต" (ไม่อิงลำดับตายตัว) — ใช้กับชีตที่มีการเพิ่มคอลัมน์ภายหลัง เช่น ptn */
+function appendRowByHeaders_(name, obj) {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name);
+  const headers = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), 1)).getValues()[0];
+  sheet.appendRow(headers.map(h => (h !== '' && obj[h] !== undefined) ? obj[h] : ''));
   invalidateCache_(name);
 }
 
@@ -966,8 +984,25 @@ function updateAppointmentInfo_(payload) {
     if (!check.ok) return check;
   }
 
+  // ผูกนัดนี้กับทะเบียนคนไข้ใหม่ตามข้อมูลหลังแก้ไข (เช่น แก้ชื่อที่พิมพ์ผิด เติมเลขบัตร เปลี่ยนเบอร์)
+  const newFirst = has('firstName') ? payload.firstName : match.firstName;
+  const newLast = has('lastName') ? payload.lastName : match.lastName;
+  const link = linkPatient_({
+    firstName: newFirst,
+    lastName: newLast,
+    nationalId: nid,
+    phone: has('phone') ? payload.phone : match.phone,
+    moo: has('moo') ? payload.moo : match.moo
+  }, {
+    oldPtn: match.ptn,
+    apptId: match.id,
+    nameEdited: nameKey_(newFirst, newLast) !== nameKey_(match.firstName, match.lastName)
+  });
+  if (!link.ok) return link;
+
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_APPTS);
   const set = (col, val) => sheet.getRange(match._row, colIndex_(sheet, col)).setValue(val);
+  if (String(match.ptn || '') !== link.ptn) set('ptn', link.ptn);
   set('nationalId', nid);
   if (has('type')) set('type', payload.type);
   if (timeChanged) { set('startTime', payload.startTime); set('endTime', payload.endTime); }
@@ -978,7 +1013,7 @@ function updateAppointmentInfo_(payload) {
   if (has('note')) set('note', String(payload.note || '').trim());
   invalidateCache_(SHEET_APPTS);
   bumpCalendarVersion_();
-  return { ok: true };
+  return { ok: true, ptn: link.ptn, isNewPatient: link.isNew, patient: link.patient };
 }
 
 /* ---------------------------- รหัส ICD-10 / ICD-9 ---------------------------- */
@@ -1016,6 +1051,343 @@ function removeIcd9Code_(payload) {
   return { ok: true };
 }
 
+/* ---------------------------- ทะเบียนคนไข้ / PTN ---------------------------- */
+// หลักการ: ข้อมูลที่ไม่ค่อยเปลี่ยนของคนไข้ (ชื่อ นามสกุล เลขบัตร เบอร์ หมู่) เก็บไว้ที่ชีต Patients ที่เดียว
+// แต่ละนัดในชีต Appointments มีคอลัมน์ ptn ชี้กลับมาที่คนไข้คนนั้น — นับจำนวนครั้ง/ดูประวัติรายคนได้จาก ptn
+// "คนเดียวกัน" ตัดสินจาก 1) PTN ที่ผู้ใช้กดเลือกเอง 2) เลขบัตรประชาชน 13 หลักตรงกัน 3) ชื่อ+นามสกุลตรงกันและมีอยู่คนเดียวในทะเบียน
+
+/** สร้างชีต Patients และคอลัมน์ ptn ในชีต Appointments ถ้ายังไม่มี (เรียกซ้ำได้ ไม่กระทบข้อมูลเดิม) */
+function ensurePatientInfra_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const apptSheet = ss.getSheetByName(SHEET_APPTS);
+  let sheet = ss.getSheetByName(SHEET_PATIENTS);
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_PATIENTS);
+    // ตั้งทั้งคอลัมน์เป็น "ข้อความธรรมดา" ก่อนใส่ข้อมูล ไม่งั้นเลข 0 นำหน้าเบอร์โทรจะหาย
+    sheet.getRange(1, 1, sheet.getMaxRows(), PATIENT_HEADERS.length).setNumberFormat('@');
+    sheet.getRange(1, 1, 1, PATIENT_HEADERS.length).setValues([PATIENT_HEADERS]);
+    sheet.setFrozenRows(1);
+    // เบอร์โทรในชีตนัดก็เช่นกัน: นัดที่ลงหลังจากนี้จะเก็บเป็นข้อความ เลข 0 นำหน้าไม่หาย (นัดเก่าไม่ถูกแก้)
+    apptSheet.getRange(1, colIndex_(apptSheet, 'phone'), apptSheet.getMaxRows(), 1).setNumberFormat('@');
+    invalidateCache_(SHEET_PATIENTS);
+  }
+  ensureColumns_(apptSheet, ['ptn']);
+  return sheet;
+}
+
+function normText_(v) {
+  return String(v === undefined || v === null ? '' : v).replace(/\s+/g, ' ').trim();
+}
+/** เลขบัตร 13 หลัก (ตัดขีด/ช่องว่างออก) ถ้าไม่ครบ 13 หลักคืนค่าว่าง */
+function normNid_(v) {
+  const d = String(v === undefined || v === null ? '' : v).replace(/\D/g, '');
+  return d.length === 13 ? d : '';
+}
+/** เบอร์โทร: เติมเลข 0 นำหน้ากลับให้เบอร์ที่ชีตเคยแปลงเป็นตัวเลขจนเลข 0 หาย (เช่น 860341397 -> 0860341397) */
+function normPhone_(v) {
+  let s = normText_(v);
+  if (/^\d{8,9}$/.test(s) && s.charAt(0) !== '0') s = '0' + s;
+  return s;
+}
+/** ค่าที่มีแต่เครื่องหมาย เช่น "." หรือ "-" (พิมพ์ไว้เพื่อให้ผ่านช่องบังคับกรอก) ไม่นับเป็นข้อมูลจริง */
+function meaningful_(v) {
+  const s = normText_(v);
+  return /[0-9A-Za-z฀-๿]/.test(s) ? s : '';
+}
+function nameKey_(first, last) {
+  return (normText_(first) + '|' + normText_(last)).toLowerCase();
+}
+
+function formatPtn_(n) {
+  let s = String(n);
+  while (s.length < PTN_DIGITS) s = '0' + s;
+  return PTN_PREFIX + s;
+}
+function ptnNumber_(ptn) {
+  let s = String(ptn === undefined || ptn === null ? '' : ptn);
+  if (PTN_PREFIX && s.indexOf(PTN_PREFIX) === 0) s = s.slice(PTN_PREFIX.length);
+  const m = s.match(/\d+/);
+  return m ? Number(m[0]) : 0;
+}
+/** เลขลำดับถัดไป: ดูทั้งทะเบียนและ PTN ที่เคยใช้ในชีตนัด เลขที่เคยออกแล้วจะไม่ถูกนำกลับมาใช้กับคนอื่น */
+function nextPtnNumber_(patients, appts) {
+  let max = 0;
+  patients.forEach(p => { const n = ptnNumber_(p.ptn); if (n > max) max = n; });
+  (appts || []).forEach(a => { const n = ptnNumber_(a.ptn); if (n > max) max = n; });
+  return max + 1;
+}
+
+/** อ่านทะเบียนคนไข้ทั้งหมด (ยังไม่มีชีต = ยังไม่มีคนไข้) */
+function patientsData_() {
+  if (!SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_PATIENTS)) return [];
+  return sheetData_(SHEET_PATIENTS).filter(p => normText_(p.ptn));
+}
+
+/** ข้อมูลคนไข้ที่ส่งให้หน้าเว็บ (เฉพาะช่องที่ใช้เติมในฟอร์มนัด) */
+function publicPatient_(p) {
+  return {
+    ptn: normText_(p.ptn),
+    firstName: normText_(p.firstName),
+    lastName: normText_(p.lastName),
+    nationalId: normNid_(p.nationalId) || normText_(p.nationalId),
+    phone: normPhone_(p.phone),
+    moo: normText_(p.moo)
+  };
+}
+
+function getPatients_() {
+  return { ok: true, data: patientsData_().map(publicPatient_) };
+}
+
+/**
+ * เขียนข้อมูลคนไข้ลงแถวที่ต่อเนื่องกัน เริ่มที่ startRow (เฉพาะคอลัมน์ของระบบ ไม่แตะคอลัมน์อื่นที่ผู้ใช้อาจเพิ่มเองในชีต)
+ * เขียนเป็น "ข้อความธรรมดา" เสมอ เลข 0 นำหน้าเบอร์โทรจะได้ไม่หาย
+ */
+function writePatientRows_(sheet, startRow, recs) {
+  if (!recs.length) return;
+  const needRows = startRow + recs.length - 1 - sheet.getMaxRows();
+  if (needRows > 0) sheet.insertRowsAfter(sheet.getMaxRows(), needRows); // ชีตเต็มแล้ว: เพิ่มแถวให้พอก่อนเขียน
+  const lastCol = Math.max(sheet.getLastColumn(), PATIENT_HEADERS.length);
+  const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  const val = (rec, h) => String(rec[h] === undefined || rec[h] === null ? '' : rec[h]);
+  if (PATIENT_HEADERS.every((h, i) => headers[i] === h)) {
+    // คอลัมน์เรียงตามมาตรฐาน: เขียนทีเดียวทั้งก้อน (เร็วกว่าเขียนทีละช่องมาก)
+    sheet.getRange(startRow, 1, recs.length, PATIENT_HEADERS.length)
+      .setNumberFormat('@')
+      .setValues(recs.map(rec => PATIENT_HEADERS.map(h => val(rec, h))));
+  } else {
+    recs.forEach((rec, r) => {
+      PATIENT_HEADERS.forEach(h => {
+        const i = headers.indexOf(h);
+        if (i !== -1) sheet.getRange(startRow + r, i + 1).setNumberFormat('@').setValue(val(rec, h));
+      });
+    });
+  }
+  invalidateCache_(SHEET_PATIENTS);
+}
+function writePatientRow_(sheet, row, rec) {
+  writePatientRows_(sheet, row, [rec]);
+}
+
+/** จำนวนนัด (ทุกสถานะ) ที่ผูกกับ PTN นี้ ไม่นับนัดที่ระบุใน excludeApptId */
+function countApptsWithPtn_(ptn, excludeApptId) {
+  return sheetData_(SHEET_APPTS).filter(a => a.id && String(a.ptn || '') === String(ptn) && a.id !== excludeApptId).length;
+}
+
+/**
+ * หาคนไข้ในทะเบียนที่ตรงกับข้อมูลที่กรอก ถ้าไม่มีให้ออก PTN ใหม่ แล้วคืน PTN กลับไปผูกกับนัด
+ * input: { firstName, lastName, nationalId, phone, moo }
+ * opts.pickedPtn = PTN ที่ผู้ใช้กดเลือกจากรายชื่อคนไข้เดิมตอนทำนัดใหม่
+ * opts.oldPtn / opts.apptId = PTN เดิมและ id ของนัดที่กำลังถูกแก้ไข
+ *
+ * ลำดับการตัดสิน:
+ *  1) กดเลือกคนไข้เดิมมา -> ใช้คนนั้น (ถ้าเลขบัตรที่กรอกเป็นของอีกคนในทะเบียน จะแจ้งเตือนและไม่บันทึก)
+ *  2) เลขบัตรตรงกับคนในทะเบียน -> คนนั้น
+ *  3) (ตอนแก้ไขนัด) ไม่ได้แก้ชื่อ -> คนเดิมของนัดนี้ (ถือว่าเป็นการแก้เลขบัตร/เบอร์/หมู่ของคนนั้น)
+ *  4) ชื่อ+นามสกุลตรงกับคนในทะเบียน "คนเดียว" และเลขบัตรไม่ขัดกัน -> คนนั้น
+ *  5) (ตอนแก้ไขนัด) แก้ชื่อ และคนเดิมของนัดนี้ไม่มีนัดอื่นเลย -> แก้ทะเบียนของคนเดิมให้ตรงกับนัด (กรณีพิมพ์ชื่อผิดตอนลงนัดครั้งแรก)
+ *  6) นอกนั้น -> คนไข้ใหม่ ออก PTN ถัดไป
+ * ข้อมูลในทะเบียนจะถูกอัปเดตเบอร์/หมู่/เลขบัตรตามที่กรอกล่าสุด แต่ไม่ถูกทับด้วยค่าว่าง (ยกเว้นกรณีข้อ 5)
+ * opts.nameEdited = true เมื่อผู้ใช้แก้ชื่อหรือนามสกุลของนัดในการบันทึกครั้งนี้
+ */
+function linkPatient_(input, opts) {
+  opts = opts || {};
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(15000); // กันสองเครื่องลงคนไข้ใหม่พร้อมกันแล้วได้ PTN ซ้ำ
+  } catch (e) {
+    return { ok: false, error: 'ระบบกำลังบันทึกรายการอื่นอยู่ กรุณาลองใหม่อีกครั้ง' };
+  }
+  try {
+    const sheet = ensurePatientInfra_();
+    delete _sheetCache_[SHEET_PATIENTS]; // อ่านทะเบียนสดหลังได้ล็อก
+    const patients = patientsData_();
+
+    const first = normText_(input.firstName), last = normText_(input.lastName);
+    const nid = normNid_(input.nationalId);
+    const phone = normPhone_(meaningful_(input.phone));
+    const moo = meaningful_(input.moo);
+    const key = nameKey_(first, last);
+
+    const byPtn = ptn => normText_(ptn) ? (patients.find(p => normText_(p.ptn) === normText_(ptn)) || null) : null;
+    const idOwner = nid ? (patients.find(p => normNid_(p.nationalId) === nid) || null) : null;
+    const picked = byPtn(opts.pickedPtn);
+    const old = byPtn(opts.oldPtn);
+
+    // rename = แก้ชื่อในทะเบียนตามที่กรอก, mirror = ทะเบียนของคนนี้มีแค่นัดนี้นัดเดียว ให้ข้อมูลในทะเบียนตรงกับนัดทุกช่อง
+    let target = null, rename = false, mirror = false;
+    if (picked) {
+      if (idOwner && idOwner !== picked) {
+        return { ok: false, error: 'เลขบัตรนี้อยู่ในทะเบียนของ ' + normText_(idOwner.ptn) + ' (' + normText_(idOwner.firstName) + ' ' + normText_(idOwner.lastName) + ') แล้ว กรุณาตรวจสอบเลขบัตร' };
+      }
+      target = picked;
+    } else if (idOwner) {
+      target = idOwner;
+      rename = idOwner === old && opts.nameEdited === true; // เลขบัตรยืนยันว่าเป็นคนเดิม และผู้ใช้ตั้งใจแก้ชื่อ = แก้ตัวสะกดในทะเบียนด้วย
+    } else if (old && (opts.nameEdited !== true || nameKey_(old.firstName, old.lastName) === key)) {
+      target = old; // ไม่ได้เปลี่ยนชื่อ = ยังเป็นคนเดิม (เป็นการแก้เลขบัตร/เบอร์/หมู่ของคนนั้น)
+    } else {
+      // ชื่อตรงกัน และเลขบัตรไม่ขัดกัน (ฝั่งใดฝั่งหนึ่งยังไม่มีเลขบัตร) — ต้องเหลือคนเดียวเท่านั้นถึงจะถือว่าเป็นคนเดียวกัน
+      const sameName = patients.filter(p => nameKey_(p.firstName, p.lastName) === key && (!nid || !normNid_(p.nationalId)));
+      if (sameName.length === 1) {
+        target = sameName[0];
+      } else if (old && countApptsWithPtn_(old.ptn, opts.apptId) === 0) {
+        target = old;
+        mirror = true;
+      }
+    }
+
+    const now = new Date().toISOString();
+    if (!target) {
+      const rec = {
+        ptn: formatPtn_(nextPtnNumber_(patients, sheetData_(SHEET_APPTS))),
+        firstName: first, lastName: last, nationalId: nid, phone: phone, moo: moo,
+        createdAt: now, updatedAt: now
+      };
+      writePatientRow_(sheet, sheet.getLastRow() + 1, rec);
+      return { ok: true, ptn: rec.ptn, isNew: true, patient: publicPatient_(rec) };
+    }
+
+    const cur = publicPatient_(target);
+    const rec = {
+      ptn: cur.ptn,
+      firstName: (rename || mirror) ? first : cur.firstName,
+      lastName: (rename || mirror) ? last : cur.lastName,
+      nationalId: mirror ? nid : (nid || cur.nationalId),
+      phone: mirror ? phone : (phone || cur.phone),
+      moo: mirror ? moo : (moo || cur.moo),
+      createdAt: normText_(target.createdAt) || now,
+      updatedAt: now
+    };
+    const changed = ['firstName', 'lastName', 'nationalId', 'phone', 'moo'].some(k => rec[k] !== normText_(target[k]));
+    if (changed) writePatientRow_(sheet, target._row, rec);
+    return { ok: true, ptn: rec.ptn, isNew: false, patient: publicPatient_(rec) };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * รัน "ครั้งเดียว" จากตัวแก้ไข Apps Script (เลือก setupPatients จาก dropdown ข้างปุ่ม "เรียกใช้" แล้วกด Run)
+ * สิ่งที่ทำ: สร้างชีต Patients, ไล่ออก PTN ให้คนไข้จากนัดที่มีอยู่แล้ว (เรียงตามวันที่มาครั้งแรก), แล้วเติม PTN ลงคอลัมน์ ptn ของทุกนัด
+ * รันซ้ำได้ปลอดภัย: คนที่มี PTN แล้วจะไม่ถูกออกเลขใหม่ และนัดที่มี PTN แล้วจะไม่ถูกแก้
+ * (ชื่อฟังก์ชันไม่ลงท้ายด้วย _ เพื่อให้ขึ้นในรายการ Run)
+ */
+function setupPatients() {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const pSheet = ensurePatientInfra_();
+    const aSheet = ss.getSheetByName(SHEET_APPTS);
+    _sheetCache_ = {};
+
+    const appts = sheetData_(SHEET_APPTS).filter(a => a.id);
+    const dateOf = a => { try { return fmtDate_(a.date); } catch (e) { return ''; } };
+    const stampOf = a => dateOf(a) + ' ' + (a.createdAt instanceof Date ? a.createdAt.toISOString() : normText_(a.createdAt));
+    const ordered = appts.slice().sort((x, y) => stampOf(x) < stampOf(y) ? -1 : (stampOf(x) > stampOf(y) ? 1 : 0));
+
+    // people = คนที่อยู่ในทะเบียนแล้ว + คนใหม่ที่พบจากนัด (ยังไม่มี ptn)
+    const people = patientsData_().map(p => {
+      const pub = publicPatient_(p);
+      return { ptn: pub.ptn, firstName: pub.firstName, lastName: pub.lastName, nid: normNid_(pub.nationalId), phone: pub.phone, moo: pub.moo, key: nameKey_(pub.firstName, pub.lastName), firstStamp: '', isNew: false };
+    });
+    const personOfAppt = {}; // id ของนัด -> คน
+    const ambiguous = {};
+    const newPerson = a => {
+      const p = { ptn: '', firstName: normText_(a.firstName), lastName: normText_(a.lastName), nid: normNid_(a.nationalId), phone: '', moo: '', key: nameKey_(a.firstName, a.lastName), firstStamp: stampOf(a), isNew: true };
+      people.push(p);
+      return p;
+    };
+    const absorb = (p, a) => { // นัดถูกไล่จากเก่าไปใหม่ ค่าล่าสุดที่เป็นข้อมูลจริงจึงเป็นค่าที่เหลืออยู่
+      personOfAppt[a.id] = p;
+      if (!p.isNew) return;
+      const ph = normPhone_(meaningful_(a.phone)), mo = meaningful_(a.moo);
+      if (ph) p.phone = ph;
+      if (mo) p.moo = mo;
+      p.firstName = normText_(a.firstName);
+      p.lastName = normText_(a.lastName);
+      p.key = nameKey_(p.firstName, p.lastName);
+    };
+
+    const active = ordered.filter(a => a.status === 'active');
+    // รอบ 0: นัดที่มี PTN อยู่แล้วและพบในทะเบียน
+    active.forEach(a => {
+      const p = normText_(a.ptn) ? people.find(x => x.ptn === normText_(a.ptn)) : null;
+      if (p) personOfAppt[a.id] = p;
+    });
+    // รอบ 1: นัดที่มีเลขบัตร — เลขบัตรเดียวกัน = คนเดียวกัน
+    active.forEach(a => {
+      if (personOfAppt[a.id]) return;
+      const nid = normNid_(a.nationalId);
+      if (!nid) return;
+      let p = people.find(x => x.nid === nid);
+      if (!p) {
+        const sameName = people.filter(x => x.key === nameKey_(a.firstName, a.lastName) && !x.nid);
+        if (sameName.length === 1) { p = sameName[0]; p.nid = nid; }
+      }
+      absorb(p || newPerson(a), a);
+    });
+    // รอบ 2: นัดที่ไม่มีเลขบัตร — ชื่อ+นามสกุลตรงกับคนเดียวในทะเบียน = คนเดียวกัน
+    active.forEach(a => {
+      if (personOfAppt[a.id]) return;
+      const key = nameKey_(a.firstName, a.lastName);
+      const sameName = people.filter(x => x.key === key);
+      let p = null;
+      if (sameName.length === 1) p = sameName[0];
+      else if (sameName.length > 1) {
+        ambiguous[normText_(a.firstName) + ' ' + normText_(a.lastName)] = true;
+        const noId = sameName.filter(x => !x.nid);
+        if (noId.length === 1) p = noId[0];
+      }
+      absorb(p || newPerson(a), a);
+    });
+
+    // ออก PTN ให้คนใหม่ เรียงตามวันที่ของนัดแรก
+    const fresh = people.filter(p => p.isNew).sort((x, y) => x.firstStamp < y.firstStamp ? -1 : (x.firstStamp > y.firstStamp ? 1 : 0));
+    let next = nextPtnNumber_(people, appts);
+    const now = new Date().toISOString();
+    fresh.forEach(p => { p.ptn = formatPtn_(next++); });
+    writePatientRows_(pSheet, pSheet.getLastRow() + 1, fresh.map(p => (
+      { ptn: p.ptn, firstName: p.firstName, lastName: p.lastName, nationalId: p.nid, phone: p.phone, moo: p.moo, createdAt: now, updatedAt: now }
+    )));
+
+    // เติม PTN ลงคอลัมน์ ptn ของนัดที่ยังว่าง (นัดที่ยกเลิกแล้วจะเติมให้เฉพาะเมื่อระบุคนได้ชัดเจน)
+    const resolveCancelled = a => {
+      const nid = normNid_(a.nationalId);
+      if (nid) { const p = people.find(x => x.nid === nid); if (p) return p; }
+      const sameName = people.filter(x => x.key === nameKey_(a.firstName, a.lastName) && (!nid || !x.nid));
+      return sameName.length === 1 ? sameName[0] : null;
+    };
+    const lastRow = aSheet.getLastRow();
+    let tagged = 0;
+    if (lastRow > 1) {
+      const col = colIndex_(aSheet, 'ptn');
+      const range = aSheet.getRange(2, col, lastRow - 1, 1);
+      const values = range.getValues();
+      appts.forEach(a => {
+        const i = a._row - 2;
+        if (normText_(values[i][0])) return;
+        const p = personOfAppt[a.id] || (a.status !== 'active' ? resolveCancelled(a) : null);
+        if (p && p.ptn) { values[i][0] = p.ptn; tagged++; }
+      });
+      range.setNumberFormat('@').setValues(values);
+    }
+    invalidateCache_(SHEET_APPTS);
+    invalidateCache_(SHEET_PATIENTS);
+
+    const total = people.length;
+    const noId = people.filter(p => !p.nid).length;
+    Logger.log('ออก PTN ใหม่ ' + fresh.length + ' คน (รวมในทะเบียน ' + total + ' คน) · เติม PTN ให้นัด ' + tagged + ' รายการ');
+    Logger.log('คนไข้ที่ยังไม่มีเลขบัตรในทะเบียน ' + noId + ' คน (จับคู่ด้วยชื่อ+นามสกุลเท่านั้น)');
+    const amb = Object.keys(ambiguous);
+    if (amb.length) Logger.log('ชื่อซ้ำกันมากกว่า 1 คน ควรตรวจในชีต Patients: ' + amb.join(', '));
+    Logger.log('เสร็จแล้ว! เปิดแท็บ Patients ในชีตเพื่อตรวจรายชื่อได้เลย');
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 /* ---------------------------- Appointments ---------------------------- */
 
 function addAppointment_(payload, auth) {
@@ -1040,7 +1412,11 @@ function addAppointment_(payload, auth) {
   icd9 = [...new Set(icd9)];
   if (icd9.length > 6) return { ok: false, error: 'ระบุรหัส ICD-9 ได้ไม่เกิน 6 รหัส' };
 
-  appendRow_(SHEET_APPTS, {
+  // หา/สร้างคนไข้ในทะเบียน แล้วผูก PTN เข้ากับนัดนี้ (payload.ptn = PTN ที่ผู้ใช้กดเลือกจากรายชื่อคนไข้เดิม ถ้ามี)
+  const link = linkPatient_(payload, { pickedPtn: payload.ptn });
+  if (!link.ok) return link;
+
+  appendRowByHeaders_(SHEET_APPTS, {
     id: Utilities.getUuid(),
     date: payload.date,
     startTime: payload.startTime,
@@ -1056,11 +1432,12 @@ function addAppointment_(payload, auth) {
     createdAt: new Date().toISOString(),
     status: 'active',
     icd10: icd10.join(','),
-    icd9: icd9.join(',')
-  }, ['id', 'date', 'startTime', 'endTime', 'type', 'firstName', 'lastName', 'moo', 'phone', 'nationalId', 'note', 'createdBy', 'createdAt', 'status', 'attendedAt', 'attendedBy', 'icd10', 'icd9']);
+    icd9: icd9.join(','),
+    ptn: link.ptn
+  });
 
   bumpCalendarVersion_();
-  return { ok: true };
+  return { ok: true, ptn: link.ptn, isNewPatient: link.isNew, patient: link.patient };
 }
 
 function cancelAppointment_(payload) {

@@ -16,7 +16,10 @@ const state = {
   icd10Codes: [],
   icd9Codes: [],
   currentApptDetailId: null,
-  settingsLoaded: false
+  settingsLoaded: false,
+  patients: [],          // ทะเบียนคนไข้ (PTN) ใช้ค้นหา/เติมข้อมูลคนไข้เดิมในฟอร์มนัด
+  patientsLoaded: false,
+  pickedPatient: null    // คนไข้เดิมที่กดเลือกไว้ในฟอร์มนัดที่กำลังเปิดอยู่
 };
 
 /* ---------------- สีคลินิก: กันตัวอักษรกลืนกับพื้นหลัง ----------------
@@ -170,6 +173,9 @@ document.getElementById('loginForm')?.addEventListener('submit', async (e) => {
 
 function logout() {
   state.token = null;
+  state.patients = [];
+  state.patientsLoaded = false;
+  state.pickedPatient = null;
   localStorage.clear();
   document.getElementById('appView').classList.add('hidden');
   document.getElementById('loginView').classList.remove('hidden');
@@ -188,7 +194,7 @@ function enterApp() {
   // (ยิงหลายคำขอพร้อมกันตอนเปิดเว็บทำให้ทุกอย่างช้าลง เพราะ Apps Script จำกัดจำนวนที่ทำงานพร้อมกันได้)
   renderCalendar().then(() => {
     if (state.role === 'physio') refreshClinicTypes();
-    refreshIcdCodes();
+    refreshIcdCodes().then(refreshPatients); // ทะเบียนคนไข้โหลดต่อท้าย ไม่แย่งคิวกับคำขออื่น
   });
 }
 
@@ -500,7 +506,7 @@ function renderApptList(appts) {
       <div><span class="appt-time">${a.startTime}-${a.endTime}</span>${a.firstName} ${a.lastName}
         <span class="badge ${a.type === 'OPD' ? 'opd' : 'community'}">${a.type}</span>
         ${a.attendedAt ? '<span class="badge attended-tag">มาแล้ว ✓</span>' : ''}</div>
-      <div style="color:var(--ink-soft);font-size:12px;">หมู่ ${a.moo}${a.phone ? ' · โทร ' + a.phone : ''}</div>
+      <div style="color:var(--ink-soft);font-size:12px;">${a.ptn ? a.ptn + ' · ' : ''}หมู่ ${a.moo}${a.phone ? ' · โทร ' + a.phone : ''}</div>
       ${actions ? `<div class="appt-actions">${actions}</div>` : ''}`;
     list.appendChild(li);
   });
@@ -602,6 +608,7 @@ function fmtDateTime_(v) {
 function openApptDetail(a) {
   // ข้อมูลที่แก้ไขได้ย้ายไปเป็นช่องกรอกด้านล่างทั้งหมด ตรงนี้แสดงเฉพาะสถานะ/ผู้บันทึก/รหัส ICD (ดูอย่างเดียว)
   const rows = [
+    ['PTN', a.ptn || '-'],
     ['วันที่นัด', state.currentDate || '-'],
     ['รหัส ICD-10', formatIcdList_(a.icd10, state.icd10Codes) || '-'],
     ['รหัส ICD-9', formatIcdList_(a.icd9, state.icd9Codes) || '-'],
@@ -699,6 +706,7 @@ document.getElementById('detailSaveAllBtn')?.addEventListener('click', async (e)
 
   const failed = results.find(r => !r.ok);
   if (failed) { errEl.textContent = failed.error; return; }
+  upsertPatient_(results[0].patient);
   toast('บันทึกการแก้ไขแล้ว');
   // ชื่อ/ประเภท/เวลาเปลี่ยนแล้ว กระทบทั้งแผงวันและตัวเลขบนปฏิทิน จึงโหลดใหม่ทั้งคู่
   closeApptDetail();
@@ -990,6 +998,8 @@ function openApptModal(startTime) {
   document.getElementById('apptDate').value = state.currentDate;
   document.getElementById('apptError').textContent = '';
   document.getElementById('apptForm').reset();
+  resetPatientPicker_();
+  if (!state.patientsLoaded) refreshPatients(); // เผื่อโหลดทะเบียนตอนเปิดเว็บไม่สำเร็จ
 
   const startSel = document.getElementById('apptStart');
   startSel.innerHTML = '';
@@ -1012,6 +1022,173 @@ function closeApptModal() {
   apptModalBackdrop.classList.add('hidden');
 }
 document.getElementById('apptCancelBtn')?.addEventListener('click', closeApptModal);
+
+/* ---------------- ทะเบียนคนไข้ (PTN): ค้นหา + เติมข้อมูลคนไข้เดิมในฟอร์มนัด ---------------- */
+// ทะเบียนทั้งหมดถูกโหลดมาเก็บไว้ในเครื่องครั้งเดียวหลังเข้าสู่ระบบ แล้วค้นหาในเครื่องขณะพิมพ์
+// (ถ้ายิงไปถาม Apps Script ทุกตัวอักษรจะต้องรอครั้งละ 1-2 วินาที พิมพ์ชื่อแล้วรายชื่อจะขึ้นไม่ทัน)
+
+async function refreshPatients() {
+  const res = await api('getPatients');
+  if (res.ok) { state.patients = res.data; state.patientsLoaded = true; }
+}
+
+/** อัปเดตทะเบียนในเครื่องให้ตรงกับที่เซิร์ฟเวอร์เพิ่งบันทึก (ไม่ต้องโหลดทะเบียนใหม่ทั้งชุด) */
+function upsertPatient_(p) {
+  if (!p || !p.ptn) return;
+  const i = state.patients.findIndex(x => x.ptn === p.ptn);
+  if (i === -1) state.patients.push(p); else state.patients[i] = p;
+}
+
+function normName_(s) {
+  return String(s === undefined || s === null ? '' : s).replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+/** หาคนไข้ในทะเบียนที่ชื่อ/นามสกุลมีข้อความที่พิมพ์อยู่ (สูงสุด 6 คน ชื่อที่ขึ้นต้นตรงกันมาก่อน) */
+function findPatientMatches_(first, last) {
+  const f = normName_(first), l = normName_(last);
+  if ((f + l).length < 2) return [];
+  const hits = [];
+  state.patients.forEach(p => {
+    const pf = normName_(p.firstName), pl = normName_(p.lastName);
+    let score;
+    if (f && !l && f.indexOf(' ') !== -1) {
+      // พิมพ์ชื่อและนามสกุลรวมกันในช่องชื่อ เช่น "สมชาย ใจ"
+      const at = (pf + ' ' + pl).indexOf(f);
+      if (at === -1) return;
+      score = at === 0 ? 0 : 2;
+    } else {
+      const fAt = f ? pf.indexOf(f) : 0;
+      const lAt = l ? pl.indexOf(l) : 0;
+      if (fAt === -1 || lAt === -1) return;
+      score = (fAt === 0 ? 0 : 2) + (lAt === 0 ? 0 : 1);
+    }
+    hits.push({ p, score });
+  });
+  hits.sort((a, b) => a.score - b.score ||
+    String(a.p.firstName).localeCompare(String(b.p.firstName), 'th') ||
+    String(a.p.lastName).localeCompare(String(b.p.lastName), 'th'));
+  return hits.slice(0, 6).map(h => h.p);
+}
+
+function renderPatientSuggest_(matches) {
+  const box = document.getElementById('apptPatientSuggest');
+  if (!box) return;
+  box.innerHTML = '';
+  if (!matches.length) { box.classList.add('hidden'); return; }
+
+  const head = document.createElement('div');
+  head.className = 'patient-suggest-head';
+  head.textContent = 'คนไข้เดิมในทะเบียน — กดเลือกเพื่อเติมข้อมูล';
+  box.appendChild(head);
+
+  matches.forEach(p => {
+    // สร้างด้วย textContent ทั้งหมด ไม่ต่อสตริงเป็น HTML เพราะเป็นข้อมูลที่คนพิมพ์เข้ามา
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'patient-suggest-item';
+
+    const top = document.createElement('span');
+    top.className = 'patient-suggest-name';
+    const name = document.createElement('span');
+    name.textContent = `${p.firstName} ${p.lastName}`;
+    const ptn = document.createElement('span');
+    ptn.className = 'patient-suggest-ptn';
+    ptn.textContent = p.ptn;
+    top.append(name, ptn);
+
+    const nid = String(p.nationalId || '').replace(/\D/g, '');
+    const parts = [];
+    if (p.moo) parts.push('หมู่ ' + p.moo);
+    if (p.phone) parts.push('โทร ' + p.phone);
+    parts.push(nid.length === 13 ? 'เลขบัตรลงท้าย ' + nid.slice(-4) : 'ยังไม่มีเลขบัตร');
+    const sub = document.createElement('span');
+    sub.className = 'patient-suggest-sub';
+    sub.textContent = parts.join(' · ');
+
+    btn.append(top, sub);
+    btn.addEventListener('click', () => pickPatient_(p));
+    box.appendChild(btn);
+  });
+  box.classList.remove('hidden');
+}
+
+function renderPatientStatus_() {
+  const box = document.getElementById('apptPatientStatus');
+  if (!box) return;
+  box.innerHTML = '';
+  const p = state.pickedPatient;
+  if (!p) { box.classList.add('hidden'); return; }
+  const label = document.createElement('span');
+  label.textContent = `คนไข้เดิม · ${p.ptn}`;
+  const undo = document.createElement('button');
+  undo.type = 'button';
+  undo.textContent = 'ไม่ใช่คนนี้';
+  undo.addEventListener('click', () => { unpickPatient_(); updatePatientSuggest_(); });
+  box.append(label, undo);
+  box.classList.remove('hidden');
+}
+
+/** กดเลือกคนไข้เดิม: เติมชื่อ นามสกุล หมู่ เบอร์ เลขบัตร จากทะเบียนลงฟอร์ม */
+function pickPatient_(p) {
+  state.pickedPatient = p;
+  document.getElementById('apptPtn').value = p.ptn;
+  document.getElementById('apptFirstName').value = p.firstName || '';
+  document.getElementById('apptLastName').value = p.lastName || '';
+  document.getElementById('apptMoo').value = p.moo || '';
+  document.getElementById('apptPhone').value = p.phone || '';
+  document.getElementById('apptNationalId').value = String(p.nationalId || '').replace(/\D/g, '');
+  renderPatientSuggest_([]);
+  renderPatientStatus_();
+}
+
+/**
+ * เลิกเลือกคนไข้เดิม และล้างช่องที่ระบบเติมให้ (เฉพาะช่องที่ยังเป็นค่าของคนนั้นอยู่ ช่องที่พิมพ์แก้เองแล้วไม่ล้าง)
+ * ต้องล้าง ไม่งั้นเลขบัตรของคนเดิมจะค้างอยู่ในฟอร์ม แล้วนัดของคนใหม่จะถูกผูกกับคนเดิมด้วยเลขบัตรนั้น
+ */
+function unpickPatient_() {
+  const p = state.pickedPatient;
+  if (!p) return;
+  const clearIfSame = (id, val) => {
+    const el = document.getElementById(id);
+    if (el.value.trim() === String(val || '').trim()) el.value = '';
+  };
+  clearIfSame('apptMoo', p.moo);
+  clearIfSame('apptPhone', p.phone);
+  clearIfSame('apptNationalId', String(p.nationalId || '').replace(/\D/g, ''));
+  state.pickedPatient = null;
+  document.getElementById('apptPtn').value = '';
+  renderPatientStatus_();
+}
+
+function resetPatientPicker_() {
+  state.pickedPatient = null;
+  const ptnEl = document.getElementById('apptPtn');
+  if (ptnEl) ptnEl.value = '';
+  renderPatientSuggest_([]);
+  renderPatientStatus_();
+}
+
+/** เรียกทุกครั้งที่พิมพ์ในช่องชื่อ/นามสกุล/เลขบัตร */
+function updatePatientSuggest_() {
+  const first = document.getElementById('apptFirstName').value;
+  const last = document.getElementById('apptLastName').value;
+  const picked = state.pickedPatient;
+
+  // แก้ชื่อหลังเลือกคนไข้เดิมไปแล้ว = ไม่ใช่คนเดิมอีกต่อไป ให้เลิกเลือก (เลือกใหม่จากรายชื่อได้เสมอ)
+  if (picked && (normName_(first) !== normName_(picked.firstName) || normName_(last) !== normName_(picked.lastName))) {
+    unpickPatient_();
+  }
+  if (state.pickedPatient) { renderPatientSuggest_([]); return; }
+
+  // พิมพ์เลขบัตรครบ 13 หลักแล้วตรงกับคนในทะเบียน: เสนอคนนั้นก่อน
+  const nid = document.getElementById('apptNationalId').value.replace(/\D/g, '');
+  const byNid = nid.length === 13 ? state.patients.filter(p => String(p.nationalId || '').replace(/\D/g, '') === nid) : [];
+  renderPatientSuggest_(byNid.length ? byNid : findPatientMatches_(first, last));
+}
+
+['apptFirstName', 'apptLastName', 'apptNationalId'].forEach(id => {
+  document.getElementById(id)?.addEventListener('input', updatePatientSuggest_);
+});
 
 /* ---------------- รหัส ICD-10 / ICD-9 (ใช้ร่วมกันทั้งตอนทำนัดและตอนแก้ไข) ---------------- */
 
@@ -1084,6 +1261,15 @@ document.getElementById('apptForm')?.addEventListener('submit', async (e) => {
   const slot = state.currentDayDetail.slots.find(s => s.start === startTime);
   const endTime = slot ? slot.end : startTime;
 
+  // เลือกคนไข้เดิมไว้ แต่เลขบัตรที่กรอกไม่ตรงกับทะเบียน: ถามก่อน เพราะบันทึกแล้วเลขบัตรในทะเบียนจะถูกแก้ตาม
+  const picked = state.pickedPatient;
+  const typedNid = document.getElementById('apptNationalId').value.replace(/\D/g, '');
+  const pickedNid = picked ? String(picked.nationalId || '').replace(/\D/g, '') : '';
+  if (picked && pickedNid.length === 13 && typedNid.length === 13 && typedNid !== pickedNid) {
+    const okToChange = confirm(`เลขบัตรที่กรอกไม่ตรงกับทะเบียนของ ${picked.ptn}\n\nในทะเบียน: ${pickedNid}\nที่กรอก: ${typedNid}\n\nกด "ตกลง" เพื่อแก้เลขบัตรในทะเบียนเป็นเลขที่กรอก\nกด "ยกเลิก" เพื่อกลับไปตรวจ`);
+    if (!okToChange) return;
+  }
+
   const submitBtn = e.target.querySelector('button[type="submit"]');
   const originalText = submitBtn.textContent;
   submitBtn.disabled = true;
@@ -1091,6 +1277,7 @@ document.getElementById('apptForm')?.addEventListener('submit', async (e) => {
 
   const res = await api('addAppointment', {
     date, startTime, endTime,
+    ptn: picked ? picked.ptn : '',
     type: document.getElementById('apptType').value,
     firstName: document.getElementById('apptFirstName').value.trim(),
     lastName: document.getElementById('apptLastName').value.trim(),
@@ -1106,7 +1293,8 @@ document.getElementById('apptForm')?.addEventListener('submit', async (e) => {
   submitBtn.textContent = originalText;
 
   if (!res.ok) { document.getElementById('apptError').textContent = res.error; return; }
-  toast('บันทึกนัดหมายแล้ว');
+  upsertPatient_(res.patient);
+  toast(res.ptn ? `บันทึกนัดหมายแล้ว · ${res.ptn}${res.isNewPatient ? ' (คนไข้ใหม่)' : ''}` : 'บันทึกนัดหมายแล้ว');
   closeApptModal();
   await Promise.all([openDayPanel(date), renderCalendar()]); // เรียกพร้อมกันแทนเรียงลำดับ ลดเวลารอ
 });
