@@ -772,3 +772,43 @@ label {
 .patient-suggest-name { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-size: 15px; font-weight: 600; color: var(--ink); }
 .patient-suggest-ptn { font-size: 14px; color: var(--teal-dark); white-space: nowrap; }
 .patient-suggest-sub { font-size: 13px; color: var(--ink-soft); }
+
+/* ---------------- สรุปประวัติคนไข้เดิม + รหัสครั้งก่อน (ฟอร์มนัด) ---------------- */
+
+.patient-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: -4px 0 12px;
+  font-size: 14px;
+  color: var(--ink-soft);
+}
+.patient-summary-main { font-size: 15px; font-weight: 600; color: var(--ink); }
+.patient-summary-warn { background: var(--amber-tint); color: #7A5D0E; border-radius: 6px; padding: 6px 10px; font-weight: 600; margin-top: 5px; }
+
+.prev-icd {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  background: var(--bg);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-top: 14px;
+  font-size: 14px;
+  color: var(--ink-soft);
+}
+.prev-icd-title { font-weight: 700; color: var(--ink); }
+.prev-icd-note { font-size: 13px; }
+.prev-icd button { align-self: flex-start; margin-top: 6px; padding: 7px 14px; font-size: 14px; }
+
+/* ---------------- สถิติรายคน ---------------- */
+
+.hbar-row.patient-row { grid-template-columns: minmax(180px, 320px) 1fr 64px; }
+.patient-row-ptn { color: var(--teal-dark); font-weight: 600; margin-inline-end: 4px; }
+@media (max-width: 720px) {
+  .hbar-row.patient-row { grid-template-columns: 1fr 56px; row-gap: 2px; }
+  .hbar-row.patient-row .hbar-label { grid-column: 1 / -1; }
+}

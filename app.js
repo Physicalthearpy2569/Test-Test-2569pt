@@ -19,7 +19,9 @@ const state = {
   settingsLoaded: false,
   patients: [],          // ทะเบียนคนไข้ (PTN) ใช้ค้นหา/เติมข้อมูลคนไข้เดิมในฟอร์มนัด
   patientsLoaded: false,
-  pickedPatient: null    // คนไข้เดิมที่กดเลือกไว้ในฟอร์มนัดที่กำลังเปิดอยู่
+  pickedPatient: null,   // คนไข้เดิมที่กดเลือกไว้ในฟอร์มนัดที่กำลังเปิดอยู่
+  patientSummary: null,  // สรุปประวัติของคนไข้ที่เลือกไว้ (จำนวนครั้ง นัดที่รออยู่ รหัสครั้งก่อน)
+  prevIcdApplied: false  // กด "ใช้รหัสครั้งก่อน" ไว้หรือไม่
 };
 
 /* ---------------- สีคลินิก: กันตัวอักษรกลืนกับพื้นหลัง ----------------
@@ -1051,7 +1053,10 @@ function findPatientMatches_(first, last) {
   state.patients.forEach(p => {
     const pf = normName_(p.firstName), pl = normName_(p.lastName);
     let score;
-    if (f && !l && f.indexOf(' ') !== -1) {
+    const q = f.replace(/\s/g, '');
+    if (!l && q.length >= 3 && /\d/.test(q) && String(p.ptn).toLowerCase().indexOf(q) !== -1) {
+      score = 0; // พิมพ์ PTN (หรือบางส่วน เช่น 69-0001) ในช่องชื่อ
+    } else if (f && !l && f.indexOf(' ') !== -1) {
       // พิมพ์ชื่อและนามสกุลรวมกันในช่องชื่อ เช่น "สมชาย ใจ"
       const at = (pf + ' ' + pl).indexOf(f);
       if (at === -1) return;
@@ -1139,6 +1144,7 @@ function pickPatient_(p) {
   document.getElementById('apptNationalId').value = String(p.nationalId || '').replace(/\D/g, '');
   renderPatientSuggest_([]);
   renderPatientStatus_();
+  loadPatientSummary_(p);
 }
 
 /**
@@ -1158,6 +1164,7 @@ function unpickPatient_() {
   state.pickedPatient = null;
   document.getElementById('apptPtn').value = '';
   renderPatientStatus_();
+  clearPatientSummary_();
 }
 
 function resetPatientPicker_() {
@@ -1166,6 +1173,113 @@ function resetPatientPicker_() {
   if (ptnEl) ptnEl.value = '';
   renderPatientSuggest_([]);
   renderPatientStatus_();
+  clearPatientSummary_();
+}
+
+/* ---------------- สรุปประวัติคนไข้เดิม: จำนวนครั้ง นัดที่รออยู่ รหัส ICD ครั้งก่อน ---------------- */
+
+/** ป้องกันข้อความที่คนพิมพ์เข้ามา (ชื่อ ฯลฯ) ถูกตีความเป็น HTML เวลาต่อสตริงใส่ innerHTML */
+function esc_(v) {
+  return String(v === undefined || v === null ? '' : v)
+    .replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+/** 'yyyy-MM-dd' -> '6 ต.ค. 2569' */
+function fmtThaiDate_(ymd) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ymd || ''));
+  if (!m) return String(ymd || '');
+  return `${Number(m[3])} ${THAI_MONTH_SHORT[Number(m[2]) - 1]} ${Number(m[1]) + 543}`;
+}
+
+let _summaryReq_ = 0; // กันผลลัพธ์ของคนที่เลือกก่อนหน้ามาทับของคนที่เลือกล่าสุด
+
+async function loadPatientSummary_(p) {
+  const req = ++_summaryReq_;
+  state.patientSummary = null;
+  renderPatientSummary_('loading');
+  const res = await api('getPatientSummary', {
+    ptn: p.ptn,
+    date: document.getElementById('apptDate').value,
+    startTime: document.getElementById('apptStart').value
+  });
+  if (req !== _summaryReq_ || !state.pickedPatient || state.pickedPatient.ptn !== p.ptn) return; // เปลี่ยนคน/ปิดฟอร์มไปแล้ว
+  if (!res.ok) { renderPatientSummary_(null); return; } // โหลดไม่ได้ก็ทำนัดต่อได้ตามปกติ แค่ไม่มีสรุป
+  state.patientSummary = res.data;
+  renderPatientSummary_(res.data);
+}
+
+/** ซ่อนสรุป และถ้าเคยกด "ใช้รหัสครั้งก่อน" ไว้ ให้ล้างรหัสที่เติมออกด้วย (ไม่งั้นรหัสของคนเดิมจะติดไปกับคนใหม่) */
+function clearPatientSummary_() {
+  _summaryReq_++;
+  state.patientSummary = null;
+  if (state.prevIcdApplied) setApptIcdSlots_([], []);
+  state.prevIcdApplied = false;
+  renderPatientSummary_(null);
+}
+
+function setApptIcdSlots_(icd10, icd9) {
+  renderIcdSlots_('apptIcd10Slots', state.icd10Codes, 2, icd10);
+  renderIcdSlots_('apptIcd9Slots', state.icd9Codes, 6, icd9);
+}
+
+/** รหัสครั้งก่อนที่ไม่ใช่รหัสอัตโนมัติ (รหัสอัตโนมัติระบบใส่ให้ทุกนัดอยู่แล้ว) ตัดให้พอดีจำนวนช่อง */
+function prevExtraCodes_(prev) {
+  const auto10 = autoCodeOf_(state.icd10Codes), auto9 = autoCodeOf_(state.icd9Codes);
+  return {
+    icd10: (prev.icd10 || []).map(String).filter(c => c && c !== auto10).slice(0, 1),
+    icd9: (prev.icd9 || []).map(String).filter(c => c && c !== auto9).slice(0, 5)
+  };
+}
+
+/** s = 'loading' | null | ข้อมูลจาก getPatientSummary */
+function renderPatientSummary_(s) {
+  const box = document.getElementById('apptPatientSummary');
+  const prevBox = document.getElementById('apptPrevIcd');
+  if (!box || !prevBox) return;
+  box.innerHTML = '';
+  prevBox.innerHTML = '';
+  prevBox.classList.add('hidden');
+  if (!s) { box.classList.add('hidden'); return; }
+  box.classList.remove('hidden');
+  const line = (parent, cls, text) => { const el = document.createElement('div'); if (cls) el.className = cls; el.textContent = text; parent.appendChild(el); return el; };
+  if (s === 'loading') { line(box, '', 'กำลังโหลดประวัติ...'); return; }
+
+  line(box, 'patient-summary-main', s.attendedCount > 0 ? `มารับบริการแล้ว ${s.attendedCount} ครั้ง` : 'ยังไม่มีบันทึกว่ามารับบริการ');
+  const parts = [];
+  if (s.attendedCount > 0 && s.lastVisit) parts.push('ครั้งล่าสุด ' + fmtThaiDate_(s.lastVisit));
+  parts.push(`นัดทั้งหมด ${s.appointmentCount} ครั้ง`);
+  if (s.cancelledCount > 0) parts.push(`ยกเลิก ${s.cancelledCount} ครั้ง`);
+  line(box, '', parts.join(' · '));
+  if (s.upcoming && s.upcoming.length) {
+    const u = s.upcoming[0];
+    line(box, 'patient-summary-warn', `มีนัดรออยู่แล้ว: ${fmtThaiDate_(u.date)} เวลา ${u.startTime}` +
+      (s.upcoming.length > 1 ? ` และอีก ${s.upcoming.length - 1} นัด` : ''));
+  }
+
+  // รหัสครั้งก่อน: แสดงเหนือช่องรหัส ICD พร้อมปุ่มให้เลือกใช้ (ไม่กด = เลือกรหัสใหม่เองตามปกติ)
+  const prev = s.previous;
+  if (!prev) return;
+  prevBox.classList.remove('hidden');
+  line(prevBox, 'prev-icd-title', `รหัสครั้งก่อน · ${fmtThaiDate_(prev.date)}` + (prev.attended ? '' : ' (ยังไม่ได้บันทึกว่ามา)'));
+  line(prevBox, '', 'ICD-10: ' + (formatIcdList_((prev.icd10 || []).join(','), state.icd10Codes) || '-'));
+  line(prevBox, '', 'ICD-9: ' + (formatIcdList_((prev.icd9 || []).join(','), state.icd9Codes) || '-'));
+  const extra = prevExtraCodes_(prev);
+  if (!extra.icd10.length && !extra.icd9.length) {
+    line(prevBox, 'prev-icd-note', 'ครั้งก่อนมีเฉพาะรหัสอัตโนมัติ ซึ่งระบบใส่ให้ทุกนัดอยู่แล้ว');
+    return;
+  }
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'secondary';
+  btn.id = 'apptPrevIcdBtn';
+  btn.textContent = state.prevIcdApplied ? 'ล้างรหัสที่เติม (เลือกใหม่เอง)' : 'ใช้รหัสครั้งก่อน';
+  btn.addEventListener('click', () => {
+    state.prevIcdApplied = !state.prevIcdApplied;
+    if (state.prevIcdApplied) setApptIcdSlots_(extra.icd10, extra.icd9); else setApptIcdSlots_([], []);
+    renderPatientSummary_(s);
+  });
+  prevBox.appendChild(btn);
+  if (state.prevIcdApplied) line(prevBox, 'prev-icd-note', 'เติมรหัสครั้งก่อนลงช่องด้านล่างแล้ว แก้ไขเพิ่มเติมได้');
 }
 
 /** เรียกทุกครั้งที่พิมพ์ในช่องชื่อ/นามสกุล/เลขบัตร */
@@ -1200,7 +1314,7 @@ async function refreshIcdCodes() {
 
 function autoCodeOf_(codeList) {
   const a = (codeList || []).find(c => c.isAuto === true);
-  return a ? a.code : null;
+  return a ? String(a.code) : null; // เทียบรหัสเป็นข้อความเสมอ (ในชีตรหัสตัวเลขล้วนอาจถูกเก็บเป็นตัวเลข)
 }
 
 /**
@@ -1224,12 +1338,15 @@ function renderIcdSlots_(containerId, codeList, totalSlots, selected) {
   for (let i = 1; i < totalSlots; i++) {
     const row = document.createElement('div');
     row.className = 'icd-slot-row';
-    const selVal = selected[i - 1] || '';
+    const selVal = String(selected[i - 1] || '');
+    // รหัสที่เคยเลือกไว้แต่ถูกลบออกจากรายการรหัสไปแล้ว: ยังต้องแสดงเป็นตัวเลือก ไม่งั้นกดบันทึกแล้วรหัสนั้นจะหายเงียบๆ
+    const missing = selVal && !options.some(o => String(o.code) === selVal);
     row.innerHTML = `
       <span class="icd-slot-label">${i + 1}</span>
       <select class="icd-slot-select">
         <option value="">-- ไม่เลือก --</option>
-        ${options.map(o => `<option value="${o.code}" ${o.code === selVal ? 'selected' : ''}>${o.code} - ${o.label}</option>`).join('')}
+        ${missing ? `<option value="${esc_(selVal)}" selected>${esc_(selVal)} (ไม่อยู่ในรายการรหัส)</option>` : ''}
+        ${options.map(o => `<option value="${esc_(o.code)}" ${String(o.code) === selVal ? 'selected' : ''}>${esc_(o.code)} - ${esc_(o.label)}</option>`).join('')}
       </select>`;
     box.appendChild(row);
   }
@@ -1248,7 +1365,7 @@ function formatIcdList_(str, codeList) {
   const codes = String(str || '').split(',').map(s => s.trim()).filter(Boolean);
   if (!codes.length) return '';
   return codes.map(c => {
-    const found = (codeList || []).find(x => x.code === c);
+    const found = (codeList || []).find(x => String(x.code) === c);
     return found ? `${c} - ${found.label}` : c;
   }).join(', ');
 }
@@ -1927,8 +2044,29 @@ function renderDashboard(d) {
         <h3>แยกตามวันในสัปดาห์</h3>
         ${renderHBars_(d.byWeekday)}
       </div>
+      ${d.byPatient ? `
+      <div class="dash-panel wide">
+        <h3>จำนวนครั้งที่มารับบริการรายคน</h3>
+        <p class="dash-sub">ตัวเลข = มารับบริการแล้ว / นัดทั้งหมดในช่วงนี้ · เรียงตามจำนวนครั้งที่มามากสุด${d.byPatientTotal > d.byPatient.length ? ` · แสดง ${d.byPatient.length} จาก ${d.byPatientTotal} คน` : ''}</p>
+        ${renderPatientBars_(d.byPatient)}
+      </div>` : ''}
     </div>
   `;
+}
+
+/** แถบจำนวนครั้งรายคน: PTN + ชื่อ + แถบ (นัดทั้งหมด/มาแล้ว) */
+function renderPatientBars_(rows) {
+  if (!rows || !rows.length) return '<div class="dash-empty">ยังไม่มีนัดที่ผูก PTN ในช่วงนี้</div>';
+  const max = Math.max(1, ...rows.map(r => r.total));
+  return rows.map(r => `
+    <div class="hbar-row patient-row">
+      <span class="hbar-label" title="${esc_(r.ptn)} ${esc_(r.name)}"><span class="patient-row-ptn">${esc_(r.ptn)}</span> ${esc_(r.name)}</span>
+      <div class="hbar-track">
+        <div class="hbar-total" style="width:${r.total / max * 100}%"></div>
+        <div class="hbar-attended" style="width:${r.attended / max * 100}%"></div>
+      </div>
+      <span class="hbar-num">${r.attended}/${r.total}</span>
+    </div>`).join('');
 }
 
 function renderHBars_(rows, useColor) {

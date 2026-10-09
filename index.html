@@ -6,7 +6,7 @@
 <title>ทดสอบระบบนัดหมายผู้ป่วย รพ.สต.</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600;700&family=Noto+Serif+Thai:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=20261009a" />
+<link rel="stylesheet" href="style.css?v=20261009b" />
 </head>
 <body>
 
@@ -298,8 +298,9 @@
       </label>
       <input type="hidden" id="apptPtn" />
       <div id="apptPatientStatus" class="patient-status hidden"></div>
+      <div id="apptPatientSummary" class="patient-summary hidden"></div>
       <label>ชื่อ
-        <input type="text" id="apptFirstName" required autocomplete="off" placeholder="พิมพ์ชื่อเพื่อค้นหาคนไข้เดิม" />
+        <input type="text" id="apptFirstName" required autocomplete="off" placeholder="พิมพ์ชื่อหรือ PTN เพื่อค้นหาคนไข้เดิม" />
       </label>
       <div id="apptPatientSuggest" class="patient-suggest hidden"></div>
       <label>นามสกุล
@@ -317,6 +318,7 @@
       <label>หมายเหตุ
         <input type="text" id="apptNote" />
       </label>
+      <div id="apptPrevIcd" class="prev-icd hidden"></div>
       <div class="section-label" style="margin-top:14px;">รหัส ICD-10</div>
       <div class="icd-slots" id="apptIcd10Slots"></div>
       <div class="section-label">รหัส ICD-9</div>
@@ -471,6 +473,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=20261009a"></script>
+  <script src="app.js?v=20261009b"></script>
 </body>
 </html>
