@@ -45,7 +45,7 @@ const PTN_FISCAL_YEAR = false; // false = นับปีตามปฏิท�
 
 // รุ่นของโค้ดหลังบ้าน — หน้าเว็บ (app.js) ใช้ค่านี้ตรวจว่าเว็บแอปถูกอัปเดตเป็นเวอร์ชันใหม่แล้วหรือยัง
 // (วางโค้ดใหม่ใน Apps Script แล้วแต่ยังไม่ได้กด "จัดการการทำให้ใช้งานได้ > เวอร์ชันใหม่" เว็บจะยังเรียกโค้ดรุ่นเก่าอยู่)
-const BACKEND_VERSION = '2026-10-10a';
+const BACKEND_VERSION = '2026-10-10b';
 
 const BUSY_TYPES = ['ประชุม', 'ทำเอกสาร', 'อบรม', 'ลา'];
 const APPT_TYPES = ['OPD', 'ลงชุมชน'];
@@ -973,14 +973,10 @@ function updateAppointmentIcd_(payload) {
   if (!match) return { ok: false, error: 'ไม่พบนัดหมายนี้' };
   if (match.status !== 'active') return { ok: false, error: 'นัดนี้ถูกยกเลิกแล้ว แก้ไขรหัส ICD ไม่ได้' };
 
-  let icd10 = Array.isArray(payload.icd10) ? payload.icd10.filter(Boolean) : [];
-  if (icd10.indexOf(ICD10_AUTO_CODE) === -1) icd10.unshift(ICD10_AUTO_CODE);
-  icd10 = [...new Set(icd10)];
+  const icd10 = icdInput_(payload.icd10, ICD10_AUTO_CODE);
   if (icd10.length > 2) return { ok: false, error: 'ระบุรหัส ICD-10 ได้ไม่เกิน 2 รหัส' };
 
-  let icd9 = Array.isArray(payload.icd9) ? payload.icd9.filter(Boolean) : [];
-  if (icd9.indexOf(ICD9_AUTO_CODE) === -1) icd9.unshift(ICD9_AUTO_CODE);
-  icd9 = [...new Set(icd9)];
+  const icd9 = icdInput_(payload.icd9, ICD9_AUTO_CODE);
   if (icd9.length > 6) return { ok: false, error: 'ระบุรหัส ICD-9 ได้ไม่เกิน 6 รหัส' };
 
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_APPTS);
@@ -1074,9 +1070,33 @@ function ensureApptTextColumns_() {
   props.setProperty('APPT_TEXT_COLS', '1');
 }
 
-/** รายการรหัสจากชีตรหัส โดยให้ code เป็นข้อความเสมอ (ในชีตอาจถูกเก็บเป็นตัวเลข เช่น 9339) */
+/**
+ * รายการรหัสจากชีตรหัส โดยให้ code เป็นข้อความเสมอ (ในชีตอาจถูกเก็บเป็นตัวเลข เช่น 9339)
+ * รหัสอัตโนมัติ (Z501 / 9339) ถือเป็น isAuto เสมอแม้ช่อง isAuto ในชีตจะไม่ใช่ TRUE และถ้ามีซ้ำในรายการจะส่งไปแถวเดียว
+ * ไม่งั้นรหัสอัตโนมัติจะไปโผล่เป็นตัวเลือกในช่องที่ 2 เป็นต้นไป แล้วถูกเลือกซ้ำได้
+ */
 function icdCodeList_(sheetName) {
-  return sheetData_(sheetName).map(r => Object.assign({}, r, { code: normText_(r.code) }));
+  const autoCode = sheetName === SHEET_ICD10 ? ICD10_AUTO_CODE : (sheetName === SHEET_ICD9 ? ICD9_AUTO_CODE : '');
+  let seenAuto = false;
+  const out = [];
+  sheetData_(sheetName).forEach(r => {
+    const code = normText_(r.code);
+    if (!code) return;
+    const isAuto = code === autoCode || r.isAuto === true || String(r.isAuto).toLowerCase() === 'true';
+    if (code === autoCode) { if (seenAuto) return; seenAuto = true; }
+    out.push(Object.assign({}, r, { code: code, isAuto: isAuto }));
+  });
+  return out;
+}
+
+/** รหัสที่หน้าเว็บส่งมาตอนบันทึก -> รายการที่จะเก็บ: รหัสอัตโนมัติอยู่ช่องแรกเสมอ ไม่ซ้ำ ไม่มีค่าว่าง */
+function icdInput_(codes, autoCode) {
+  const out = [autoCode];
+  (Array.isArray(codes) ? codes : []).forEach(c => {
+    const v = normText_(c);
+    if (v && out.indexOf(v) === -1) out.push(v);
+  });
+  return out;
 }
 
 /** แบ่งข้อความตัวเลขยาวๆ ออกเป็นรหัสที่รู้จัก — คืนผลเฉพาะเมื่อแบ่งได้แบบเดียวเท่านั้น (ไม่กำกวม) */
@@ -1619,14 +1639,10 @@ function addAppointment_(payload, auth) {
   if (!check.ok) return check;
 
   // ช่องแรกของ ICD-10/ICD-9 ล็อกเป็นรหัสอัตโนมัติเสมอ ไม่ว่าฝั่งหน้าเว็บจะส่งมาครบหรือไม่
-  let icd10 = Array.isArray(payload.icd10) ? payload.icd10.filter(Boolean) : [];
-  if (icd10.indexOf(ICD10_AUTO_CODE) === -1) icd10.unshift(ICD10_AUTO_CODE);
-  icd10 = [...new Set(icd10)];
+  const icd10 = icdInput_(payload.icd10, ICD10_AUTO_CODE);
   if (icd10.length > 2) return { ok: false, error: 'ระบุรหัส ICD-10 ได้ไม่เกิน 2 รหัส' };
 
-  let icd9 = Array.isArray(payload.icd9) ? payload.icd9.filter(Boolean) : [];
-  if (icd9.indexOf(ICD9_AUTO_CODE) === -1) icd9.unshift(ICD9_AUTO_CODE);
-  icd9 = [...new Set(icd9)];
+  const icd9 = icdInput_(payload.icd9, ICD9_AUTO_CODE);
   if (icd9.length > 6) return { ok: false, error: 'ระบุรหัส ICD-9 ได้ไม่เกิน 6 รหัส' };
 
   // หา/สร้างคนไข้ในทะเบียน แล้วผูก PTN เข้ากับนัดนี้ (payload.ptn = PTN ที่ผู้ใช้กดเลือกจากรายชื่อคนไข้เดิม ถ้ามี)

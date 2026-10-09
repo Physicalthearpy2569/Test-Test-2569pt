@@ -21,7 +21,7 @@ const state = {
   patientsLoaded: false,
   pickedPatient: null,   // คนไข้เดิมที่กดเลือกไว้ในฟอร์มนัดที่กำลังเปิดอยู่
   patientSummary: null,  // สรุปประวัติของคนไข้ที่เลือกไว้ (จำนวนครั้ง นัดที่รออยู่ รหัสครั้งก่อน)
-  prevIcdApplied: false, // กด "ใช้รหัสครั้งก่อน" ไว้หรือไม่
+  prevIcdApplied: { icd10: false, icd9: false }, // กด "ใช้ ICD-10 / ICD-9 ครั้งก่อน" ไว้หรือไม่ (แยกกัน)
   todayDetail: null      // ข้อมูลนัดของ "วันนี้" สำหรับรายการนัดวันนี้บนหน้าปฏิทิน
 };
 
@@ -126,7 +126,7 @@ function jsonp_(action, payload) {
 // ปลุกสคริปต์ทันทีที่หน้าเว็บโหลด (ก่อนผู้ใช้กดอะไรเลย) เผื่อเครื่องเย็นอยู่ (ไม่มีคนใช้มาสักพัก)
 // กว่าผู้ใช้จะพิมพ์ชื่อ/รหัสผ่านแล้วกดเข้าสู่ระบบเสร็จ สคริปต์มักจะอุ่นพอแล้ว ไม่ต้องรอผลอะไรจากตรงนี้
 // คำตอบของ ping บอกรุ่นของหลังบ้านด้วย ใช้เตือนเมื่อวางโค้ดใหม่ใน Apps Script แล้วแต่ยังไม่ได้อัปเดตเว็บแอปเป็นเวอร์ชันใหม่
-const EXPECTED_BACKEND = '2026-10-10a';
+const EXPECTED_BACKEND = '2026-10-10b';
 jsonp_('ping', {}).then(checkBackendVersion_).catch(() => {});
 
 function checkBackendVersion_(res) {
@@ -1330,14 +1330,19 @@ async function loadPatientSummary_(p) {
 function clearPatientSummary_() {
   _summaryReq_++;
   state.patientSummary = null;
-  if (state.prevIcdApplied) setApptIcdSlots_([], []);
-  state.prevIcdApplied = false;
+  ICD_KINDS_.forEach(k => { if (state.prevIcdApplied[k.key]) setApptIcdSlot_(k, []); });
+  state.prevIcdApplied = { icd10: false, icd9: false };
   renderPatientSummary_(null);
 }
 
-function setApptIcdSlots_(icd10, icd9) {
-  renderIcdSlots_('apptIcd10Slots', state.icd10Codes, 2, icd10);
-  renderIcdSlots_('apptIcd9Slots', state.icd9Codes, 6, icd9);
+// ICD-10 และ ICD-9 แยกกันทุกอย่าง: กล่อง "ครั้งก่อน" ปุ่ม และช่องรหัสของใครของมัน
+const ICD_KINDS_ = [
+  { key: 'icd10', label: 'ICD-10', slotsId: 'apptIcd10Slots', prevBoxId: 'apptPrevIcd10', btnId: 'apptPrevIcd10Btn', total: 2, codes: () => state.icd10Codes },
+  { key: 'icd9', label: 'ICD-9', slotsId: 'apptIcd9Slots', prevBoxId: 'apptPrevIcd9', btnId: 'apptPrevIcd9Btn', total: 6, codes: () => state.icd9Codes }
+];
+/** เติม/ล้างช่องรหัสของชนิดเดียว ไม่แตะช่องของอีกชนิด */
+function setApptIcdSlot_(kind, selected) {
+  renderIcdSlots_(kind.slotsId, kind.codes(), kind.total, selected);
 }
 
 /** รหัสครั้งก่อนที่ไม่ใช่รหัสอัตโนมัติ (รหัสอัตโนมัติระบบใส่ให้ทุกนัดอยู่แล้ว) ตัดให้พอดีจำนวนช่อง */
@@ -1352,11 +1357,9 @@ function prevExtraCodes_(prev) {
 /** s = 'loading' | null | ข้อมูลจาก getPatientSummary */
 function renderPatientSummary_(s) {
   const box = document.getElementById('apptPatientSummary');
-  const prevBox = document.getElementById('apptPrevIcd');
-  if (!box || !prevBox) return;
+  if (!box) return;
   box.innerHTML = '';
-  prevBox.innerHTML = '';
-  prevBox.classList.add('hidden');
+  ICD_KINDS_.forEach(k => { const pb = document.getElementById(k.prevBoxId); if (pb) { pb.innerHTML = ''; pb.classList.add('hidden'); } });
   if (!s) { box.classList.add('hidden'); return; }
   box.classList.remove('hidden');
   const line = (parent, cls, text) => { const el = document.createElement('div'); if (cls) el.className = cls; el.textContent = text; parent.appendChild(el); return el; };
@@ -1375,32 +1378,34 @@ function renderPatientSummary_(s) {
       (s.upcoming.length > 1 ? ` และอีก ${s.upcoming.length - 1} นัด` : ''));
   }
 
-  // รหัสครั้งก่อน: แสดงเหนือช่องรหัส ICD พร้อมปุ่มให้เลือกใช้ (ไม่กด = เลือกรหัสใหม่เองตามปกติ)
+  // รหัสครั้งก่อน: ICD-10 และ ICD-9 มีกล่องและปุ่มของตัวเอง อยู่เหนือช่องรหัสของชนิดนั้น (ไม่กด = เลือกรหัสใหม่เองตามปกติ)
   const prev = s.previous;
   if (!prev) return;
-  prevBox.classList.remove('hidden');
-  line(prevBox, 'prev-icd-title', `รหัสครั้งก่อน · ${fmtThaiDate_(prev.date)}` + (prev.attended ? '' : ' (ยังไม่ได้บันทึกว่ามา)'));
   const extra = prevExtraCodes_(prev);
-  // บอกให้ชัดเมื่อครั้งก่อนมีแค่รหัสอัตโนมัติ จะได้ไม่เข้าใจผิดว่าระบบเติมรหัสให้ไม่ครบ
-  const autoOnly = ' (มีเฉพาะรหัสอัตโนมัติ ไม่มีรหัสเพิ่ม)';
-  line(prevBox, '', 'ICD-10: ' + (formatIcdList_((prev.icd10 || []).join(','), state.icd10Codes) || '-') + (extra.icd10.length ? '' : autoOnly));
-  line(prevBox, '', 'ICD-9: ' + (formatIcdList_((prev.icd9 || []).join(','), state.icd9Codes) || '-') + (extra.icd9.length ? '' : autoOnly));
-  if (!extra.icd10.length && !extra.icd9.length) {
-    line(prevBox, 'prev-icd-note', 'ครั้งก่อนมีเฉพาะรหัสอัตโนมัติ ซึ่งระบบใส่ให้ทุกนัดอยู่แล้ว');
-    return;
-  }
-  const btn = document.createElement('button');
-  btn.type = 'button';
-  btn.className = 'secondary';
-  btn.id = 'apptPrevIcdBtn';
-  btn.textContent = state.prevIcdApplied ? 'ล้างรหัสที่เติม (เลือกใหม่เอง)' : 'ใช้รหัสครั้งก่อน';
-  btn.addEventListener('click', () => {
-    state.prevIcdApplied = !state.prevIcdApplied;
-    if (state.prevIcdApplied) setApptIcdSlots_(extra.icd10, extra.icd9); else setApptIcdSlots_([], []);
-    renderPatientSummary_(s);
+  ICD_KINDS_.forEach(kind => {
+    const pb = document.getElementById(kind.prevBoxId);
+    if (!pb) return;
+    pb.classList.remove('hidden');
+    const applied = state.prevIcdApplied[kind.key];
+    line(pb, 'prev-icd-title', `${kind.label} ครั้งก่อน · ${fmtThaiDate_(prev.date)}` + (prev.attended ? '' : ' (ยังไม่ได้บันทึกว่ามา)'));
+    line(pb, '', formatIcdList_((prev[kind.key] || []).join(','), kind.codes()) || '-');
+    if (!extra[kind.key].length) {
+      // บอกให้ชัด จะได้ไม่เข้าใจผิดว่าระบบเติมรหัสให้ไม่ครบ
+      line(pb, 'prev-icd-note', 'มีเฉพาะรหัสอัตโนมัติ ซึ่งระบบใส่ให้ทุกนัดอยู่แล้ว');
+      return;
+    }
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'secondary';
+    btn.id = kind.btnId;
+    btn.textContent = applied ? `ล้าง ${kind.label} ที่เติม` : `ใช้ ${kind.label} ครั้งก่อน`;
+    btn.addEventListener('click', () => {
+      state.prevIcdApplied[kind.key] = !applied;
+      setApptIcdSlot_(kind, applied ? [] : extra[kind.key]);
+      renderPatientSummary_(s);
+    });
+    pb.appendChild(btn);
   });
-  prevBox.appendChild(btn);
-  if (state.prevIcdApplied) line(prevBox, 'prev-icd-note', 'เติมรหัสครั้งก่อนลงช่องด้านล่างแล้ว แก้ไขเพิ่มเติมได้');
 }
 
 /** เรียกทุกครั้งที่พิมพ์ในช่องชื่อ/นามสกุล/เลขบัตร */
@@ -2199,6 +2204,78 @@ function renderDashboard(d) {
   document.getElementById('dashToPatientsBtn')?.addEventListener('click', () => showView_('patients'));
 }
 
+/* ---------------- ค้นหาคนไข้แบบย่อ (บนหน้าปฏิทิน): นัดครั้งหน้าวันไหน + ปุ่มไปหน้ารายละเอียด ---------------- */
+
+let _quickReq_ = 0;
+
+function closeQuickSearch_(clearInput) {
+  _quickReq_++;
+  renderPatientSuggest_([], { boxId: 'quickSearchResults' });
+  const card = document.getElementById('quickSearchCard');
+  if (card) { card.innerHTML = ''; card.classList.add('hidden'); }
+  if (clearInput) { const input = document.getElementById('quickSearchInput'); if (input) input.value = ''; }
+}
+
+document.getElementById('quickSearchInput')?.addEventListener('input', (e) => {
+  const card = document.getElementById('quickSearchCard');
+  card.innerHTML = ''; card.classList.add('hidden');
+  if (!state.patientsLoaded) refreshPatients();
+  renderPatientSuggest_(findPatientMatches_(e.target.value, '', 8), { boxId: 'quickSearchResults', head: 'กดเลือกเพื่อดูนัดครั้งหน้า', onPick: quickPick_ });
+});
+document.getElementById('quickSearchInput')?.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeQuickSearch_(true); });
+// คลิกที่อื่นนอกกล่องค้นหา = ปิดรายชื่อ/การ์ด
+document.addEventListener('click', (e) => {
+  const box = document.getElementById('quickSearch');
+  // ใช้เส้นทางของเหตุการณ์ ไม่ใช้ contains(): ปุ่มรายชื่อที่ถูกกดจะถูกลบออกจากหน้าไปก่อนถึงตรงนี้ จึงดูเหมือน "อยู่นอกกล่อง"
+  const inside = box && (e.composedPath ? e.composedPath().indexOf(box) !== -1 : box.contains(e.target));
+  if (box && !inside) closeQuickSearch_(false);
+});
+
+async function quickPick_(p) {
+  const req = ++_quickReq_;
+  renderPatientSuggest_([], { boxId: 'quickSearchResults' });
+  document.getElementById('quickSearchInput').value = `${p.firstName} ${p.lastName}`;
+  const card = document.getElementById('quickSearchCard');
+  const el = (tag, cls, text) => { const x = document.createElement(tag); if (cls) x.className = cls; if (text !== undefined) x.textContent = text; return x; };
+  const head = () => {
+    card.innerHTML = '';
+    const h = el('div', 'quick-card-head');
+    h.append(el('span', 'quick-card-name', `${p.firstName} ${p.lastName}`), el('span', 'patient-suggest-ptn', p.ptn));
+    card.appendChild(h);
+  };
+  head();
+  card.appendChild(el('div', 'quick-card-line', 'กำลังโหลด...'));
+  card.classList.remove('hidden');
+
+  const res = await api('getPatientSummary', { ptn: p.ptn });
+  if (req !== _quickReq_) return; // เลือกคนอื่น/ปิดไปแล้ว
+  head();
+  if (!res.ok) {
+    card.appendChild(el('div', 'quick-card-line patient-summary-error', 'โหลดข้อมูลไม่สำเร็จ: ' + (res.error || '')));
+  } else {
+    const up = res.data.upcoming || [];
+    if (up.length) {
+      card.appendChild(el('div', 'quick-card-label', up.length > 1 ? `นัดครั้งหน้า (รออยู่ ${up.length} นัด)` : 'นัดครั้งหน้า'));
+      up.slice(0, 3).forEach((u, i) => {
+        const b = el('button', 'quick-card-appt' + (i === 0 ? ' is-next' : ''), `${fmtThaiDate_(u.date)} เวลา ${u.startTime}-${u.endTime} · ${u.type}`);
+        b.type = 'button';
+        b.title = 'เปิดวันนี้ในปฏิทิน';
+        b.addEventListener('click', () => { closeQuickSearch_(true); gotoDate_(u.date); });
+        card.appendChild(b);
+      });
+      if (up.length > 3) card.appendChild(el('div', 'quick-card-line', `และอีก ${up.length - 3} นัด`));
+    } else {
+      card.appendChild(el('div', 'quick-card-line', 'ไม่มีนัดที่รออยู่'));
+    }
+    if (res.data.lastVisit) card.appendChild(el('div', 'quick-card-line', `มาครั้งล่าสุด ${fmtThaiDate_(res.data.lastVisit)} · มาแล้ว ${res.data.attendedCount} ครั้ง`));
+  }
+  const more = el('button', 'secondary quick-card-more', 'รายละเอียดเพิ่มเติม');
+  more.type = 'button';
+  more.id = 'quickSearchMoreBtn';
+  more.addEventListener('click', () => { closeQuickSearch_(true); showView_('patients'); loadPatientProfile_(p); });
+  card.appendChild(more);
+}
+
 /* ---------------- ค้นหาคนไข้: พิมพ์ชื่อ/PTN แล้วดูข้อมูลและนัดทั้งหมดของคนนั้น ---------------- */
 
 let _profileReq_ = 0;
@@ -2245,13 +2322,17 @@ function renderPatientProfile_(s, fallback) {
     { label: 'มาครั้งแรก', num: s.firstVisit ? fmtThaiDate_(s.firstVisit) : '-', small: true },
     { label: 'มาครั้งล่าสุด', num: s.lastVisit ? fmtThaiDate_(s.lastVisit) : '-', small: true }
   ];
-  const icd = (codes, list) => esc_((codes || []).join(', ')) || '-';
+  // รหัส + ชื่อรหัส (คำอธิบายจากรายการรหัสในหน้าตั้งค่า) ชื่อใช้ตัวเล็ก รหัสที่ไม่มีในรายการแสดงเฉพาะรหัส
+  const icd = (codes, list) => (codes || []).map(c => {
+    const found = (list || []).find(x => String(x.code) === String(c));
+    return `<div class="icd-line"><span class="icd-code">${esc_(c)}</span>${found && found.label ? ` <span class="icd-name">${esc_(found.label)}</span>` : ''}</div>`;
+  }).join('') || '-';
   const rows = (s.history || []).map(h => {
     const st = apptStatusLabel_(h, today);
     return `<tr data-date="${esc_(h.date)}" class="${h.status === 'cancelled' ? 'is-cancelled' : ''}">
       <td>${esc_(fmtThaiDate_(h.date))}</td><td>${esc_(h.startTime)}-${esc_(h.endTime)}</td><td>${esc_(h.type)}</td>
       <td><span class="badge ${st.cls}">${st.text}</span></td>
-      <td>${icd(h.icd10)}</td><td>${icd(h.icd9)}</td><td>${esc_(h.note || '')}</td></tr>`;
+      <td>${icd(h.icd10, state.icd10Codes)}</td><td>${icd(h.icd9, state.icd9Codes)}</td><td>${esc_(h.note || '')}</td></tr>`;
   }).join('');
   box.innerHTML = `
     <div class="profile-head">

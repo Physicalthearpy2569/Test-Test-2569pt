@@ -796,7 +796,7 @@ label {
   background: var(--bg);
   border-radius: 8px;
   padding: 10px 12px;
-  margin-top: 14px;
+  margin: 0 0 8px;
   font-size: 14px;
   color: var(--ink-soft);
 }
@@ -873,6 +873,11 @@ label {
 .table-scroll { overflow-x: auto; }
 .profile-table th:not(:first-child), .profile-table td:not(:first-child) { text-align: left; }
 .profile-table td { white-space: nowrap; }
+/* คอลัมน์รหัส ICD: รหัสละบรรทัด ชื่อรหัสตัวเล็กต่อท้าย ตัดบรรทัดได้ */
+.profile-table td:nth-child(5), .profile-table td:nth-child(6) { white-space: normal; min-width: 190px; }
+.icd-line { line-height: 1.35; margin-bottom: 3px; }
+.icd-code { font-weight: 600; }
+.icd-name { font-size: 12px; color: var(--ink-soft); }
 .profile-table td:last-child { white-space: normal; min-width: 120px; }
 .profile-table tbody tr { cursor: pointer; }
 .profile-table tbody tr:hover { background: var(--teal-tint); }
@@ -880,7 +885,49 @@ label {
 .profile-upcoming { cursor: pointer; }
 .profile-open { color: var(--teal-dark); font-size: 13px; font-weight: 600; white-space: nowrap; }
 
+/* ---------------- ค้นหาคนไข้แบบย่อบนหน้าปฏิทิน ---------------- */
+
+.quick-search { position: relative; flex: 0 1 250px; min-width: 190px; }
+.quick-search input { font-size: 15px; padding: 7px 10px; border-radius: 8px; }
+.quick-search .patient-suggest, .quick-card {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  width: max(100%, 320px);
+  max-width: calc(100vw - 32px);
+  margin: 0;
+  z-index: 20;
+  box-shadow: 0 12px 30px rgba(34, 48, 41, 0.18);
+}
+.quick-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 14px;
+}
+.quick-card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.quick-card-name { font-weight: 700; font-size: 16px; color: var(--ink); }
+.quick-card-label { font-size: 13px; color: var(--ink-soft); margin-top: 2px; }
+.quick-card-line { color: var(--ink-soft); }
+.quick-card-appt {
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 14px;
+  color: var(--ink);
+}
+.quick-card-appt.is-next { background: var(--teal-tint); border-color: var(--teal-tint); color: var(--teal-dark); font-weight: 700; font-size: 15px; }
+.quick-card-appt:hover { border-color: var(--teal); }
+.quick-card-more { margin-top: 6px; padding: 8px 14px; font-size: 14px; }
+
 @media (max-width: 720px) {
+  .quick-search { flex: 1 1 100%; order: 3; }
+
   /* มีเมนู 4 รายการแล้ว: ให้เมนูลงไปอยู่บรรทัดที่สองใต้ชื่อระบบ แต่ละปุ่มอยู่บรรทัดเดียว ไม่ตัดคำ */
   .sidebar { flex-wrap: wrap; row-gap: 6px; }
   .sidebar nav { flex-basis: 100%; justify-content: space-between; gap: 4px; }

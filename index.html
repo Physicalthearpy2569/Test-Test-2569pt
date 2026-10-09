@@ -6,7 +6,7 @@
 <title>ทดสอบระบบนัดหมายผู้ป่วย รพ.สต.</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600;700&family=Noto+Serif+Thai:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=20261010a" />
+<link rel="stylesheet" href="style.css?v=20261010b" />
 </head>
 <body>
 
@@ -57,6 +57,12 @@
             <button id="prevMonth" aria-label="เดือนก่อนหน้า">‹</button>
             <h2 id="monthLabel"></h2>
             <button id="nextMonth" aria-label="เดือนถัดไป">›</button>
+          </div>
+          <!-- ค้นหาคนไข้แบบย่อ: ดูนัดครั้งหน้า แล้วค่อยกดไปหน้ารายละเอียด -->
+          <div class="quick-search" id="quickSearch">
+            <input type="search" id="quickSearchInput" placeholder="ค้นหาคนไข้ (ชื่อ / PTN)" autocomplete="off" aria-label="ค้นหาคนไข้" />
+            <div id="quickSearchResults" class="patient-suggest hidden"></div>
+            <div id="quickSearchCard" class="quick-card hidden"></div>
           </div>
           <div class="legend">
             <span class="legend-item"><i class="dot opd"></i>OPD</span>
@@ -345,10 +351,11 @@
       <label>หมายเหตุ
         <input type="text" id="apptNote" />
       </label>
-      <div id="apptPrevIcd" class="prev-icd hidden"></div>
       <div class="section-label" style="margin-top:14px;">รหัส ICD-10</div>
+      <div id="apptPrevIcd10" class="prev-icd hidden"></div>
       <div class="icd-slots" id="apptIcd10Slots"></div>
       <div class="section-label">รหัส ICD-9</div>
+      <div id="apptPrevIcd9" class="prev-icd hidden"></div>
       <div class="icd-slots" id="apptIcd9Slots"></div>
       <p id="apptError" class="error-text"></p>
       <div class="modal-actions">
@@ -500,6 +507,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=20261010a"></script>
+  <script src="app.js?v=20261010b"></script>
 </body>
 </html>
