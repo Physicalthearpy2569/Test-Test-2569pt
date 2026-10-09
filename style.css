@@ -804,11 +804,92 @@ label {
 .prev-icd-note { font-size: 13px; }
 .prev-icd button { align-self: flex-start; margin-top: 6px; padding: 7px 14px; font-size: 14px; }
 
-/* ---------------- สถิติรายคน ---------------- */
+.patient-summary-error { color: var(--danger); font-weight: 600; }
 
-.hbar-row.patient-row { grid-template-columns: minmax(180px, 320px) 1fr 64px; }
-.patient-row-ptn { color: var(--teal-dark); font-weight: 600; margin-inline-end: 4px; }
+/* ---------------- แถบเตือนรุ่นหลังบ้านไม่ตรง ---------------- */
+
+.version-banner {
+  background: var(--amber-tint);
+  color: #6B4F08;
+  border: 1px solid var(--amber);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 14px;
+  line-height: 1.5;
+  margin-bottom: 16px;
+}
+.login-card .version-banner { margin: 14px 0 0; text-align: left; }
+.version-tag { font-size: 11px; opacity: 0.6; margin-top: 10px; }
+
+.link-btn { color: var(--teal-dark); font-weight: 600; text-decoration: underline; font-size: inherit; padding: 0; }
+
+/* ---------------- นัดวันนี้ (บนหน้าปฏิทิน) ---------------- */
+
+.today-panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  margin-bottom: 16px;
+}
+.today-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.today-head h3 { margin: 0; font-size: 17px; }
+.today-count { color: var(--ink-soft); font-size: 14px; flex: 1; }
+.today-head .link-btn { font-size: 14px; }
+.today-list { list-style: none; padding: 0; margin: 10px 0 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 8px; }
+.today-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 15px;
+}
+.today-item.attended { background: #F3FAF5; border-color: #BFE3C9; }
+.today-info { cursor: pointer; min-width: 0; flex: 1; }
+.today-sub { display: block; color: var(--ink-soft); font-size: 12px; margin-top: 2px; }
+.today-item .appt-attend { padding: 8px 14px; font-size: 15px; white-space: nowrap; flex-shrink: 0; }
+.today-item .appt-unattend { white-space: nowrap; flex-shrink: 0; }
+.today-empty { color: var(--ink-soft); font-size: 14px; }
+
+/* ---------------- ตารางสรุปขนาดเล็ก (สถิติ / ประวัติคนไข้) ---------------- */
+
+.mini-table { width: 100%; border-collapse: collapse; font-size: 15px; margin-top: 8px; }
+.mini-table th { text-align: left; font-size: 13px; color: var(--ink-soft); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.mini-table td { padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.mini-table th:not(:first-child), .mini-table td:not(:first-child) { text-align: right; }
+.mini-table tr.mini-total td { font-weight: 700; border-bottom: none; }
+
+/* ---------------- ค้นหาคนไข้ ---------------- */
+
+.patient-search { max-width: 520px; }
+.patient-search .patient-suggest { margin: 6px 0 0; }
+.profile-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 20px; }
+.profile-head h3 { margin: 0; font-size: 22px; }
+.profile-ptn { font-size: 14px; padding: 3px 10px; }
+.kpi-num.kpi-num-small { font-size: 19px; line-height: 1.5; }
+.table-scroll { overflow-x: auto; }
+.profile-table th:not(:first-child), .profile-table td:not(:first-child) { text-align: left; }
+.profile-table td { white-space: nowrap; }
+.profile-table td:last-child { white-space: normal; min-width: 120px; }
+.profile-table tbody tr { cursor: pointer; }
+.profile-table tbody tr:hover { background: var(--teal-tint); }
+.profile-table tr.is-cancelled td { color: var(--ink-soft); }
+.profile-upcoming { cursor: pointer; }
+.profile-open { color: var(--teal-dark); font-size: 13px; font-weight: 600; white-space: nowrap; }
+
 @media (max-width: 720px) {
-  .hbar-row.patient-row { grid-template-columns: 1fr 56px; row-gap: 2px; }
-  .hbar-row.patient-row .hbar-label { grid-column: 1 / -1; }
+  /* มีเมนู 4 รายการแล้ว: ให้เมนูลงไปอยู่บรรทัดที่สองใต้ชื่อระบบ แต่ละปุ่มอยู่บรรทัดเดียว ไม่ตัดคำ */
+  .sidebar { flex-wrap: wrap; row-gap: 6px; }
+  .sidebar nav { flex-basis: 100%; justify-content: space-between; gap: 4px; }
+  .navBtn { white-space: nowrap; padding: 8px 8px; font-size: 14px; flex: 1 1 auto; }
+
+  .today-list { grid-template-columns: 1fr; }
+  .today-item .appt-attend { padding: 9px 12px; }
+  /* จอแคบ ป้ายในปฏิทินถูกย่อเป็นจุดสี — แต่ป้ายในรายการนัดวันนี้/หน้าคนไข้ต้องอ่านเป็นข้อความได้ */
+  .today-item .badge, .profile-table .badge, .profile-head .badge, .profile-upcoming .badge {
+    font-size: 12px; padding: 2px 7px; border-radius: 999px; width: auto; height: auto;
+  }
 }

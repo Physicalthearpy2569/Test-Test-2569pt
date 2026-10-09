@@ -21,7 +21,8 @@ const state = {
   patientsLoaded: false,
   pickedPatient: null,   // คนไข้เดิมที่กดเลือกไว้ในฟอร์มนัดที่กำลังเปิดอยู่
   patientSummary: null,  // สรุปประวัติของคนไข้ที่เลือกไว้ (จำนวนครั้ง นัดที่รออยู่ รหัสครั้งก่อน)
-  prevIcdApplied: false  // กด "ใช้รหัสครั้งก่อน" ไว้หรือไม่
+  prevIcdApplied: false, // กด "ใช้รหัสครั้งก่อน" ไว้หรือไม่
+  todayDetail: null      // ข้อมูลนัดของ "วันนี้" สำหรับรายการนัดวันนี้บนหน้าปฏิทิน
 };
 
 /* ---------------- สีคลินิก: กันตัวอักษรกลืนกับพื้นหลัง ----------------
@@ -124,7 +125,23 @@ function jsonp_(action, payload) {
 
 // ปลุกสคริปต์ทันทีที่หน้าเว็บโหลด (ก่อนผู้ใช้กดอะไรเลย) เผื่อเครื่องเย็นอยู่ (ไม่มีคนใช้มาสักพัก)
 // กว่าผู้ใช้จะพิมพ์ชื่อ/รหัสผ่านแล้วกดเข้าสู่ระบบเสร็จ สคริปต์มักจะอุ่นพอแล้ว ไม่ต้องรอผลอะไรจากตรงนี้
-jsonp_('ping', {}).catch(() => {});
+// คำตอบของ ping บอกรุ่นของหลังบ้านด้วย ใช้เตือนเมื่อวางโค้ดใหม่ใน Apps Script แล้วแต่ยังไม่ได้อัปเดตเว็บแอปเป็นเวอร์ชันใหม่
+const EXPECTED_BACKEND = '2026-10-10a';
+jsonp_('ping', {}).then(checkBackendVersion_).catch(() => {});
+
+function checkBackendVersion_(res) {
+  const v = (res && res.data && res.data.version) || '';
+  const ok = v === EXPECTED_BACKEND;
+  document.querySelectorAll('.version-banner').forEach(el => {
+    el.classList.toggle('hidden', ok);
+    el.textContent = ok ? '' :
+      'หลังบ้าน (Apps Script) ยังไม่ใช่รุ่นเดียวกับหน้าเว็บ ฟีเจอร์ใหม่บางอย่างจะไม่ทำงาน — ' +
+      'เปิด Apps Script แล้วกด การทำให้ใช้งานได้ > จัดการการทำให้ใช้งานได้ > รูปดินสอ > เวอร์ชันใหม่ > ทำให้ใช้งานได้ ' +
+      `(หน้าเว็บรุ่น ${EXPECTED_BACKEND} · หลังบ้านรุ่น ${v || 'เก่ากว่า 2026-10-10'})`;
+  });
+  const tag = document.getElementById('versionTag');
+  if (tag) tag.textContent = `รุ่น ${EXPECTED_BACKEND}${ok ? '' : ' (หลังบ้าน: ' + (v || 'เก่า') + ')'}`;
+}
 
 async function api(action, payload = {}) {
   if (state.token) payload.token = state.token;
@@ -178,6 +195,13 @@ function logout() {
   state.patients = [];
   state.patientsLoaded = false;
   state.pickedPatient = null;
+  state.todayDetail = null;
+  // ไม่ทิ้งข้อมูลคนไข้ค้างบนจอหลังออกจากระบบ
+  const profileBox = document.getElementById('patientProfile');
+  if (profileBox) profileBox.innerHTML = '';
+  const searchInput = document.getElementById('patientSearchInput');
+  if (searchInput) searchInput.value = '';
+  document.getElementById('todayPanel')?.classList.add('hidden');
   localStorage.clear();
   document.getElementById('appView').classList.add('hidden');
   document.getElementById('loginView').classList.remove('hidden');
@@ -194,7 +218,7 @@ function enterApp() {
   });
   // ปฏิทินสำคัญที่สุด ให้ขึ้นก่อนโดยไม่ต้องแย่งคิว Apps Script กับคำขออื่น
   // (ยิงหลายคำขอพร้อมกันตอนเปิดเว็บทำให้ทุกอย่างช้าลง เพราะ Apps Script จำกัดจำนวนที่ทำงานพร้อมกันได้)
-  renderCalendar().then(() => {
+  renderCalendar().then(loadToday_).then(() => {
     if (state.role === 'physio') refreshClinicTypes();
     refreshIcdCodes().then(refreshPatients); // ทะเบียนคนไข้โหลดต่อท้าย ไม่แย่งคิวกับคำขออื่น
   });
@@ -202,18 +226,110 @@ function enterApp() {
 
 /* ---------------- Navigation ---------------- */
 
+function showView_(view) {
+  document.querySelectorAll('.navBtn').forEach(b => b.classList.toggle('active', b.dataset.view === view));
+  document.getElementById('calendarView').classList.toggle('hidden', view !== 'calendar');
+  document.getElementById('settingsView').classList.toggle('hidden', view !== 'settings');
+  document.getElementById('dashboardView')?.classList.toggle('hidden', view !== 'dashboard');
+  document.getElementById('patientsView')?.classList.toggle('hidden', view !== 'patients');
+  if (view === 'settings' && !state.settingsLoaded) loadSettings();
+  if (view === 'dashboard' && !state.dashboardLoaded) { setDashPreset_('thisMonth'); loadDashboard(); }
+  if (view === 'patients') {
+    if (!state.patientsLoaded) refreshPatients();
+    document.getElementById('patientSearchInput')?.focus();
+  }
+}
 document.querySelectorAll('.navBtn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.navBtn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    const view = btn.dataset.view;
-    document.getElementById('calendarView').classList.toggle('hidden', view !== 'calendar');
-    document.getElementById('settingsView').classList.toggle('hidden', view !== 'settings');
-    document.getElementById('dashboardView')?.classList.toggle('hidden', view !== 'dashboard');
-    if (view === 'settings' && !state.settingsLoaded) loadSettings();
-    if (view === 'dashboard' && !state.dashboardLoaded) { setDashPreset_('thisMonth'); loadDashboard(); }
-  });
+  btn.addEventListener('click', () => showView_(btn.dataset.view));
 });
+
+/* ---------------- นัดวันนี้ (บนหน้าปฏิทิน): กด "มาแล้ว" ได้เลยโดยไม่ต้องเปิดวัน ---------------- */
+
+function todayYmd_() {
+  const n = new Date();
+  return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-${String(n.getDate()).padStart(2, '0')}`;
+}
+
+async function loadToday_() {
+  if (!state.token) return;
+  const res = await api('getDayDetail', { date: todayYmd_() });
+  if (!res.ok) return;
+  state.todayDetail = res.data;
+  renderToday_();
+}
+
+/** อัปเดตสถานะ "มาแล้ว" ของนัดในเครื่อง ทั้งในรายการนัดวันนี้และในแผงรายละเอียดวัน (อาจเป็นข้อมูลคนละชุดกัน) */
+function markAttendedLocal_(id, attended) {
+  [state.todayDetail, state.currentDayDetail].forEach(detail => {
+    const appt = detail && (detail.appointments || []).find(a => a.id === id);
+    if (appt) {
+      appt.attendedAt = attended ? new Date().toISOString() : '';
+      appt.attendedBy = attended ? state.displayName : '';
+    }
+  });
+  renderToday_();
+}
+
+function renderToday_() {
+  const panel = document.getElementById('todayPanel');
+  const list = document.getElementById('todayList');
+  const d = state.todayDetail;
+  if (!panel || !list) return;
+  if (!d) { panel.classList.add('hidden'); return; }
+  panel.classList.remove('hidden');
+
+  const appts = (d.appointments || []).slice().sort((a, b) => a.startTime < b.startTime ? -1 : 1);
+  const came = appts.filter(a => a.attendedAt).length;
+  document.getElementById('todayTitle').textContent = 'นัดวันนี้ · ' + fmtThaiDate_(d.date);
+  document.getElementById('todayCount').textContent = appts.length ? `${appts.length} นัด · มาแล้ว ${came}` : '';
+
+  list.innerHTML = '';
+  if (!appts.length) {
+    const li = document.createElement('li');
+    li.className = 'today-empty';
+    li.textContent = d.isOpen ? 'วันนี้ยังไม่มีนัด' : ('วันนี้ปิดทำการ' + (d.closedReason ? ': ' + d.closedReason : ''));
+    list.appendChild(li);
+    return;
+  }
+  const isPhysio = state.role === 'physio';
+  const span = (cls, text) => { const el = document.createElement('span'); if (cls) el.className = cls; el.textContent = text; return el; };
+  appts.forEach(a => {
+    const li = document.createElement('li');
+    li.className = 'today-item' + (a.attendedAt ? ' attended' : '');
+
+    const info = document.createElement('div');
+    info.className = 'today-info';
+    const top = document.createElement('div');
+    top.append(span('appt-time', `${a.startTime}-${a.endTime}`), span('', `${a.firstName} ${a.lastName} `), span('badge ' + (a.type === 'OPD' ? 'opd' : 'community'), a.type));
+    if (a.attendedAt) top.append(' ', span('badge attended-tag', 'มาแล้ว ✓'));
+    const sub = span('today-sub', [a.ptn, a.moo ? 'หมู่ ' + a.moo : '', a.phone ? 'โทร ' + a.phone : ''].filter(Boolean).join(' · '));
+    info.append(top, sub);
+    info.addEventListener('click', () => openDayPanel(d.date)); // กดที่ชื่อ = เปิดรายละเอียดของวันนี้
+    li.appendChild(info);
+
+    if (isPhysio) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = a.attendedAt ? 'appt-unattend' : 'appt-attend';
+      btn.textContent = a.attendedAt ? 'ยกเลิก "มาแล้ว"' : 'มาแล้ว ✓';
+      btn.addEventListener('click', async () => {
+        const attended = !a.attendedAt;
+        btn.disabled = true;
+        const res = await api('markAttended', { id: a.id, attended });
+        if (!res.ok) { toast(res.error); btn.disabled = false; return; }
+        toast(attended ? `บันทึกว่า ${a.firstName} มาแล้ว` : 'ยกเลิกการบันทึกแล้ว');
+        markAttendedLocal_(a.id, attended);
+        // ถ้าแผงรายละเอียดของวันนี้เปิดอยู่ ให้รายการในแผงเปลี่ยนตามด้วย
+        if (state.currentDate === d.date && state.currentDayDetail && !dayPanel.classList.contains('hidden')) {
+          renderApptList(state.currentDayDetail.appointments);
+        }
+      });
+      li.appendChild(btn);
+    }
+    list.appendChild(li);
+  });
+}
+document.getElementById('todayRefreshBtn')?.addEventListener('click', loadToday_);
 
 /* ---------------- ปฏิทิน ---------------- */
 
@@ -398,6 +514,7 @@ async function openDayPanel(dateStr) {
   const res = await api('getDayDetail', { date: dateStr });
   if (!res.ok) { toast(res.error); return; }
   state.currentDayDetail = res.data;
+  if (dateStr === todayYmd_()) { state.todayDetail = res.data; renderToday_(); }
 
   const d = new Date(dateStr + 'T00:00:00');
   const weekdays = ['อาทิตย์','จันทร์','อังคาร','พุธ','พฤหัสบดี','ศุกร์','เสาร์'];
@@ -545,8 +662,7 @@ function renderApptList(appts) {
       toast(attended ? 'บันทึกว่ามาทำกายภาพแล้ว' : 'ยกเลิกการบันทึกแล้ว');
       const appt = (state.currentDayDetail?.appointments || []).find(a => a.id === btn.dataset.id);
       if (appt) {
-        appt.attendedAt = attended ? new Date().toISOString() : '';
-        appt.attendedBy = attended ? state.displayName : '';
+        markAttendedLocal_(btn.dataset.id, attended);
         renderApptList(state.currentDayDetail.appointments);
       } else {
         // ไม่พบใน state (ไม่ควรเกิดขึ้น) — สำรองด้วยการโหลดใหม่
@@ -595,6 +711,7 @@ function applyLocalCancel_(apptId) {
 
   const newSlotsAvailable = detail.isOpen ? detail.slots.filter(s => s.available).length : null;
   patchCalendarDayAfterCancel_(state.currentDate, cancelled.type, newSlotsAvailable);
+  if (state.currentDate === todayYmd_()) { state.todayDetail = detail; renderToday_(); }
 }
 
 /* ---------------- ดูรายละเอียดนัดหมาย ---------------- */
@@ -730,8 +847,7 @@ document.getElementById('apptDetailAttendBtn')?.addEventListener('click', async 
   // ไม่กระทบปฏิทินเช่นเดียวกับปุ่มในรายการ — อัปเดต state ในเครื่องแล้ว render รายการใหม่ทันที
   const appt = (state.currentDayDetail?.appointments || []).find(a => a.id === btn.dataset.id);
   if (appt) {
-    appt.attendedAt = attended ? new Date().toISOString() : '';
-    appt.attendedBy = attended ? state.displayName : '';
+    markAttendedLocal_(btn.dataset.id, attended);
     renderApptList(state.currentDayDetail.appointments);
   }
   closeApptDetail();
@@ -1046,7 +1162,7 @@ function normName_(s) {
 }
 
 /** หาคนไข้ในทะเบียนที่ชื่อ/นามสกุลมีข้อความที่พิมพ์อยู่ (สูงสุด 6 คน ชื่อที่ขึ้นต้นตรงกันมาก่อน) */
-function findPatientMatches_(first, last) {
+function findPatientMatches_(first, last, limit) {
   const f = normName_(first), l = normName_(last);
   if ((f + l).length < 2) return [];
   const hits = [];
@@ -1072,18 +1188,20 @@ function findPatientMatches_(first, last) {
   hits.sort((a, b) => a.score - b.score ||
     String(a.p.firstName).localeCompare(String(b.p.firstName), 'th') ||
     String(a.p.lastName).localeCompare(String(b.p.lastName), 'th'));
-  return hits.slice(0, 6).map(h => h.p);
+  return hits.slice(0, limit || 6).map(h => h.p);
 }
 
-function renderPatientSuggest_(matches) {
-  const box = document.getElementById('apptPatientSuggest');
+/** opts (ไม่บังคับ): { boxId, head, onPick } — ค่าเริ่มต้นคือรายชื่อในฟอร์มนัด; หน้าค้นหาคนไข้ใช้ฟังก์ชันเดียวกันกับกล่องของตัวเอง */
+function renderPatientSuggest_(matches, opts) {
+  opts = opts || {};
+  const box = document.getElementById(opts.boxId || 'apptPatientSuggest');
   if (!box) return;
   box.innerHTML = '';
   if (!matches.length) { box.classList.add('hidden'); return; }
 
   const head = document.createElement('div');
   head.className = 'patient-suggest-head';
-  head.textContent = 'คนไข้เดิมในทะเบียน — กดเลือกเพื่อเติมข้อมูล';
+  head.textContent = opts.head || 'คนไข้เดิมในทะเบียน — กดเลือกเพื่อเติมข้อมูล';
   box.appendChild(head);
 
   matches.forEach(p => {
@@ -1111,7 +1229,7 @@ function renderPatientSuggest_(matches) {
     sub.textContent = parts.join(' · ');
 
     btn.append(top, sub);
-    btn.addEventListener('click', () => pickPatient_(p));
+    btn.addEventListener('click', () => (opts.onPick || pickPatient_)(p));
     box.appendChild(btn);
   });
   box.classList.remove('hidden');
@@ -1203,7 +1321,7 @@ async function loadPatientSummary_(p) {
     startTime: document.getElementById('apptStart').value
   });
   if (req !== _summaryReq_ || !state.pickedPatient || state.pickedPatient.ptn !== p.ptn) return; // เปลี่ยนคน/ปิดฟอร์มไปแล้ว
-  if (!res.ok) { renderPatientSummary_(null); return; } // โหลดไม่ได้ก็ทำนัดต่อได้ตามปกติ แค่ไม่มีสรุป
+  if (!res.ok) { renderPatientSummary_({ error: res.error || 'ไม่ทราบสาเหตุ' }); return; } // โหลดไม่ได้ก็ทำนัดต่อได้ตามปกติ แค่ไม่มีสรุป
   state.patientSummary = res.data;
   renderPatientSummary_(res.data);
 }
@@ -1243,6 +1361,7 @@ function renderPatientSummary_(s) {
   box.classList.remove('hidden');
   const line = (parent, cls, text) => { const el = document.createElement('div'); if (cls) el.className = cls; el.textContent = text; parent.appendChild(el); return el; };
   if (s === 'loading') { line(box, '', 'กำลังโหลดประวัติ...'); return; }
+  if (s.error) { line(box, 'patient-summary-error', 'โหลดประวัติไม่สำเร็จ: ' + s.error); line(box, '', 'ยังทำนัดต่อได้ตามปกติ โดยเลือกรหัสเอง'); return; }
 
   line(box, 'patient-summary-main', s.attendedCount > 0 ? `มารับบริการแล้ว ${s.attendedCount} ครั้ง` : 'ยังไม่มีบันทึกว่ามารับบริการ');
   const parts = [];
@@ -1261,9 +1380,11 @@ function renderPatientSummary_(s) {
   if (!prev) return;
   prevBox.classList.remove('hidden');
   line(prevBox, 'prev-icd-title', `รหัสครั้งก่อน · ${fmtThaiDate_(prev.date)}` + (prev.attended ? '' : ' (ยังไม่ได้บันทึกว่ามา)'));
-  line(prevBox, '', 'ICD-10: ' + (formatIcdList_((prev.icd10 || []).join(','), state.icd10Codes) || '-'));
-  line(prevBox, '', 'ICD-9: ' + (formatIcdList_((prev.icd9 || []).join(','), state.icd9Codes) || '-'));
   const extra = prevExtraCodes_(prev);
+  // บอกให้ชัดเมื่อครั้งก่อนมีแค่รหัสอัตโนมัติ จะได้ไม่เข้าใจผิดว่าระบบเติมรหัสให้ไม่ครบ
+  const autoOnly = ' (มีเฉพาะรหัสอัตโนมัติ ไม่มีรหัสเพิ่ม)';
+  line(prevBox, '', 'ICD-10: ' + (formatIcdList_((prev.icd10 || []).join(','), state.icd10Codes) || '-') + (extra.icd10.length ? '' : autoOnly));
+  line(prevBox, '', 'ICD-9: ' + (formatIcdList_((prev.icd9 || []).join(','), state.icd9Codes) || '-') + (extra.icd9.length ? '' : autoOnly));
   if (!extra.icd10.length && !extra.icd9.length) {
     line(prevBox, 'prev-icd-note', 'ครั้งก่อนมีเฉพาะรหัสอัตโนมัติ ซึ่งระบบใส่ให้ทุกนัดอยู่แล้ว');
     return;
@@ -2003,15 +2124,20 @@ function renderDashboard(d) {
   const rateTxt = t.attendanceRate === null ? 'ยังไม่มีข้อมูล' : pct_(t.trackedPast ? Math.round(t.attendanceRate * t.trackedPast) : 0, t.trackedPast) + '%';
   note.textContent = `ช่วง ${d.from} ถึง ${d.to}` + (d.trackingStart ? ` · เริ่มมีข้อมูล "มาแล้ว" ตั้งแต่ ${d.trackingStart}` : ' · ยังไม่เคยมีการบันทึก "มาแล้ว" เลย');
 
+  // เคส (ราย) = คนไม่นับซ้ำที่มารับบริการในช่วง · visit (ครั้ง) = จำนวนครั้งที่มารับบริการในช่วง (นับจากการกด "มาแล้ว")
+  const cases = t.cases !== undefined ? t.cases : t.patientsSeen;
+  const visits = t.visits !== undefined ? t.visits : t.attended;
   const kpis = [
-    { label: 'นัดทั้งหมด (ไม่รวมยกเลิก)', num: t.appointments, cls: 'hero' },
-    { label: 'มารับบริการแล้ว', num: t.attended, sub: pct_(t.attended, t.appointments) + '% ของนัดทั้งหมด' },
+    { label: 'จำนวนเคส (ราย)', num: cases, cls: 'hero', sub: t.newCases !== undefined ? `รายใหม่ ${t.newCases} · รายเก่า ${t.returningCases}` : '' },
+    { label: 'จำนวน visit (ครั้ง)', num: visits, cls: 'hero', sub: cases ? `เฉลี่ย ${(visits / cases).toFixed(1)} ครั้งต่อราย` : '' },
+    { label: 'นัดทั้งหมด (ไม่รวมยกเลิก)', num: t.appointments, sub: pct_(t.attended, t.appointments) + '% มารับบริการแล้ว' },
     { label: 'ยังไม่ถึงวันนัด', num: t.upcoming },
     { label: 'ไม่มาตามนัด', num: t.noShow, sub: t.trackedPast ? `จาก ${t.trackedPast} นัดที่ผ่านไปแล้ว` : 'ยังไม่มีข้อมูลเทียบ' },
     { label: 'อัตรามาตามนัด', num: rateTxt },
-    { label: 'จำนวนคนไข้ที่มา (ไม่นับซ้ำ)', num: t.patientsSeen, sub: t.repeatPatients ? `มาซ้ำ ${t.repeatPatients} คน` : '' },
     { label: 'ยกเลิกนัด', num: t.cancelled }
   ];
+  const hasCases = (d.byType || []).some(r => r.cases !== undefined);
+  const monthName = k => `${THAI_MONTH_SHORT[Number(k.slice(5, 7)) - 1]} ${Number(k.slice(0, 4)) + 543}`;
   document.getElementById('dashBody').innerHTML = `
     <div class="kpi-grid">
       ${kpis.map(k => `
@@ -2021,10 +2147,34 @@ function renderDashboard(d) {
           ${k.sub ? `<div class="kpi-sub">${k.sub}</div>` : ''}
         </div>`).join('')}
     </div>
+    <p class="dash-sub">เคสและ visit นับจากนัดที่กด "มาแล้ว" เท่านั้น · รายใหม่ = มารับบริการครั้งแรกในช่วงนี้ · หน้านี้ไม่แสดงชื่อคนไข้
+      <button type="button" class="link-btn" id="dashToPatientsBtn">ดูข้อมูลรายคน</button></p>
     <div class="dash-grid">
+      ${hasCases ? `
+      <div class="dash-panel">
+        <h3>เคส / visit แยกตามประเภทนัด</h3>
+        <table class="mini-table">
+          <thead><tr><th>ประเภท</th><th>เคส (ราย)</th><th>visit (ครั้ง)</th></tr></thead>
+          <tbody>
+            ${d.byType.map(r => `<tr><td>${esc_(r.name)}</td><td>${r.cases}</td><td>${r.attended}</td></tr>`).join('')}
+            <tr class="mini-total"><td>รวม (เคสไม่นับซ้ำ)</td><td>${cases}</td><td>${visits}</td></tr>
+          </tbody>
+        </table>
+      </div>` : ''}
+      ${hasCases && d.granularity === 'month' ? `
+      <div class="dash-panel">
+        <h3>เคส / visit รายเดือน</h3>
+        <table class="mini-table">
+          <thead><tr><th>เดือน</th><th>เคส (ราย)</th><th>visit (ครั้ง)</th></tr></thead>
+          <tbody>
+            ${d.trend.map(r => `<tr><td>${monthName(r.key)}</td><td>${r.cases}</td><td>${r.attended}</td></tr>`).join('')}
+          </tbody>
+        </table>
+        <p class="dash-sub" style="margin:8px 0 0;">เคสของแต่ละเดือนนับไม่ซ้ำภายในเดือนนั้น คนที่มาหลายเดือนจะถูกนับในทุกเดือนที่มา</p>
+      </div>` : ''}
       <div class="dash-panel wide">
         <h3>แนวโน้มจำนวนนัด${d.granularity === 'day' ? 'รายวัน' : 'รายเดือน'}</h3>
-        <p class="dash-sub">แท่งอ่อน = นัดทั้งหมด · แท่งเขียว = มารับบริการแล้ว</p>
+        <p class="dash-sub">แท่งอ่อน = นัดทั้งหมด · แท่งเขียว = มารับบริการแล้ว (visit)</p>
         ${renderTrend_(d.trend, d.granularity)}
       </div>
       <div class="dash-panel">
@@ -2044,29 +2194,102 @@ function renderDashboard(d) {
         <h3>แยกตามวันในสัปดาห์</h3>
         ${renderHBars_(d.byWeekday)}
       </div>
-      ${d.byPatient ? `
-      <div class="dash-panel wide">
-        <h3>จำนวนครั้งที่มารับบริการรายคน</h3>
-        <p class="dash-sub">ตัวเลข = มารับบริการแล้ว / นัดทั้งหมดในช่วงนี้ · เรียงตามจำนวนครั้งที่มามากสุด${d.byPatientTotal > d.byPatient.length ? ` · แสดง ${d.byPatient.length} จาก ${d.byPatientTotal} คน` : ''}</p>
-        ${renderPatientBars_(d.byPatient)}
-      </div>` : ''}
     </div>
   `;
+  document.getElementById('dashToPatientsBtn')?.addEventListener('click', () => showView_('patients'));
 }
 
-/** แถบจำนวนครั้งรายคน: PTN + ชื่อ + แถบ (นัดทั้งหมด/มาแล้ว) */
-function renderPatientBars_(rows) {
-  if (!rows || !rows.length) return '<div class="dash-empty">ยังไม่มีนัดที่ผูก PTN ในช่วงนี้</div>';
-  const max = Math.max(1, ...rows.map(r => r.total));
-  return rows.map(r => `
-    <div class="hbar-row patient-row">
-      <span class="hbar-label" title="${esc_(r.ptn)} ${esc_(r.name)}"><span class="patient-row-ptn">${esc_(r.ptn)}</span> ${esc_(r.name)}</span>
-      <div class="hbar-track">
-        <div class="hbar-total" style="width:${r.total / max * 100}%"></div>
-        <div class="hbar-attended" style="width:${r.attended / max * 100}%"></div>
-      </div>
-      <span class="hbar-num">${r.attended}/${r.total}</span>
-    </div>`).join('');
+/* ---------------- ค้นหาคนไข้: พิมพ์ชื่อ/PTN แล้วดูข้อมูลและนัดทั้งหมดของคนนั้น ---------------- */
+
+let _profileReq_ = 0;
+
+document.getElementById('patientSearchInput')?.addEventListener('input', (e) => {
+  const matches = findPatientMatches_(e.target.value, '', 12);
+  renderPatientSuggest_(matches, { boxId: 'patientSearchResults', head: 'กดเลือกเพื่อดูข้อมูล', onPick: loadPatientProfile_ });
+  const hint = document.getElementById('patientSearchHint');
+  if (hint) {
+    const q = e.target.value.trim();
+    hint.textContent = !state.patientsLoaded ? 'กำลังโหลดทะเบียนคนไข้...' : (q.length >= 2 && !matches.length ? 'ไม่พบคนไข้ที่ตรงกับคำค้น' : '');
+  }
+});
+
+async function loadPatientProfile_(p) {
+  const req = ++_profileReq_;
+  renderPatientSuggest_([], { boxId: 'patientSearchResults' });
+  document.getElementById('patientSearchInput').value = `${p.firstName} ${p.lastName}`;
+  const box = document.getElementById('patientProfile');
+  box.innerHTML = '<p class="panel-hint" style="margin-top:14px;">กำลังโหลดข้อมูล...</p>';
+  const res = await api('getPatientSummary', { ptn: p.ptn, full: true });
+  if (req !== _profileReq_) return;
+  if (!res.ok) { box.innerHTML = `<p class="error-text" style="margin-top:14px;">โหลดข้อมูลไม่สำเร็จ: ${esc_(res.error)}</p>`; return; }
+  renderPatientProfile_(res.data, p);
+}
+
+function apptStatusLabel_(h, today) {
+  if (h.status === 'cancelled') return { text: 'ยกเลิก', cls: 'closed-tag' };
+  if (h.attended) return { text: 'มาแล้ว', cls: 'attended-tag' };
+  if (h.date >= today) return { text: 'นัดไว้', cls: 'special-tag' };
+  return { text: 'ไม่มีบันทึกว่ามา', cls: 'busy' };
+}
+
+function renderPatientProfile_(s, fallback) {
+  const box = document.getElementById('patientProfile');
+  const p = s.patient || fallback;
+  const today = s.today || todayYmd_();
+  const nid = String(p.nationalId || '').replace(/\D/g, '');
+  const info = [p.moo ? 'หมู่ ' + p.moo : '', p.phone ? 'โทร ' + p.phone : '', nid.length === 13 ? 'เลขบัตรลงท้าย ' + nid.slice(-4) : 'ยังไม่มีเลขบัตร'].filter(Boolean).join(' · ');
+  const kpis = [
+    { label: 'มารับบริการแล้ว (ครั้ง)', num: s.attendedCount, cls: 'hero' },
+    { label: 'นัดทั้งหมด (ไม่รวมยกเลิก)', num: s.appointmentCount },
+    { label: 'ยกเลิกนัด', num: s.cancelledCount },
+    { label: 'มาครั้งแรก', num: s.firstVisit ? fmtThaiDate_(s.firstVisit) : '-', small: true },
+    { label: 'มาครั้งล่าสุด', num: s.lastVisit ? fmtThaiDate_(s.lastVisit) : '-', small: true }
+  ];
+  const icd = (codes, list) => esc_((codes || []).join(', ')) || '-';
+  const rows = (s.history || []).map(h => {
+    const st = apptStatusLabel_(h, today);
+    return `<tr data-date="${esc_(h.date)}" class="${h.status === 'cancelled' ? 'is-cancelled' : ''}">
+      <td>${esc_(fmtThaiDate_(h.date))}</td><td>${esc_(h.startTime)}-${esc_(h.endTime)}</td><td>${esc_(h.type)}</td>
+      <td><span class="badge ${st.cls}">${st.text}</span></td>
+      <td>${icd(h.icd10)}</td><td>${icd(h.icd9)}</td><td>${esc_(h.note || '')}</td></tr>`;
+  }).join('');
+  box.innerHTML = `
+    <div class="profile-head">
+      <h3>${esc_(p.firstName)} ${esc_(p.lastName)}</h3>
+      <span class="badge avail-tag profile-ptn">${esc_(s.ptn)}</span>
+    </div>
+    <p class="panel-hint" style="margin-top:2px;">${esc_(info)}</p>
+    <div class="kpi-grid">
+      ${kpis.map(k => `
+        <div class="kpi-card ${k.cls || ''}">
+          <div class="kpi-num${k.small ? ' kpi-num-small' : ''}">${esc_(k.num)}</div>
+          <div class="kpi-label">${k.label}</div>
+        </div>`).join('')}
+    </div>
+    <div class="dash-panel" style="margin-bottom:16px;">
+      <h3>นัดที่รออยู่</h3>
+      ${(s.upcoming || []).length
+        ? `<ul class="tag-list" style="margin-top:8px;">${s.upcoming.map(u => `<li class="profile-upcoming" data-date="${esc_(u.date)}"><span>${esc_(fmtThaiDate_(u.date))} เวลา ${esc_(u.startTime)}-${esc_(u.endTime)} <span class="badge ${u.type === 'OPD' ? 'opd' : 'community'}">${esc_(u.type)}</span></span><span class="profile-open">เปิดในปฏิทิน</span></li>`).join('')}</ul>`
+        : '<div class="dash-empty">ไม่มีนัดที่รออยู่</div>'}
+    </div>
+    <div class="dash-panel">
+      <h3>ประวัตินัดทั้งหมด</h3>
+      <p class="dash-sub">ใหม่สุดอยู่บน · กดที่แถวเพื่อเปิดวันนั้นในปฏิทิน${s.historyTotal > (s.history || []).length ? ` · แสดง ${s.history.length} จาก ${s.historyTotal} รายการ` : ''}</p>
+      ${rows ? `<div class="table-scroll"><table class="mini-table profile-table">
+        <thead><tr><th>วันที่</th><th>เวลา</th><th>ประเภท</th><th>สถานะ</th><th>ICD-10</th><th>ICD-9</th><th>หมายเหตุ</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>` : '<div class="dash-empty">ยังไม่มีนัดในระบบ</div>'}
+    </div>`;
+  box.querySelectorAll('[data-date]').forEach(el => el.addEventListener('click', () => gotoDate_(el.dataset.date)));
+}
+
+/** ไปที่ปฏิทินของเดือนนั้น แล้วเปิดแผงรายละเอียดของวันนั้น */
+async function gotoDate_(ymd) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return;
+  showView_('calendar');
+  state.year = Number(ymd.slice(0, 4));
+  state.month = Number(ymd.slice(5, 7));
+  await renderCalendar();
+  openDayPanel(ymd);
 }
 
 function renderHBars_(rows, useColor) {

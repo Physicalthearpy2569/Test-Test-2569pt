@@ -43,6 +43,10 @@ const PTN_PREFIX = 'PTN';
 const PTN_DIGITS = 4;
 const PTN_FISCAL_YEAR = false; // false = นับปีตามปฏิทิน (ม.ค.-ธ.ค.), true = นับตามปีงบประมาณ (ต.ค.-ก.ย.)
 
+// รุ่นของโค้ดหลังบ้าน — หน้าเว็บ (app.js) ใช้ค่านี้ตรวจว่าเว็บแอปถูกอัปเดตเป็นเวอร์ชันใหม่แล้วหรือยัง
+// (วางโค้ดใหม่ใน Apps Script แล้วแต่ยังไม่ได้กด "จัดการการทำให้ใช้งานได้ > เวอร์ชันใหม่" เว็บจะยังเรียกโค้ดรุ่นเก่าอยู่)
+const BACKEND_VERSION = '2026-10-10a';
+
 const BUSY_TYPES = ['ประชุม', 'ทำเอกสาร', 'อบรม', 'ลา'];
 const APPT_TYPES = ['OPD', 'ลงชุมชน'];
 
@@ -190,7 +194,7 @@ function doGet(e) {
 
 function route_(action, payload) {
   // Actions ที่ไม่ต้อง login
-  if (action === 'ping') return { ok: true, data: { pong: true } }; // ใช้ปลุก/เช็คว่าสคริปต์ยัง "อุ่น" อยู่ไหม เบาที่สุดเท่าที่จะทำได้ (ไม่แตะชีตเลย)
+  if (action === 'ping') return { ok: true, data: { pong: true, version: BACKEND_VERSION } }; // ใช้ปลุก/เช็คว่าสคริปต์ยัง "อุ่น" อยู่ไหม เบาที่สุดเท่าที่จะทำได้ (ไม่แตะชีตเลย)
   if (action === 'login') return login_(payload);
 
   // Actions ที่ต้อง login (ตรวจ token)
@@ -372,13 +376,38 @@ function appendRow_(name, obj, headers) {
   invalidateCache_(name);
 }
 
-/** เพิ่มแถวโดยวางค่าตาม "หัวคอลัมน์จริงในชีต" (ไม่อิงลำดับตายตัว) — ใช้กับชีตที่มีการเพิ่มคอลัมน์ภายหลัง เช่น ptn */
-function appendRowByHeaders_(name, obj) {
+/**
+ * เพิ่มแถวโดยวางค่าตาม "หัวคอลัมน์จริงในชีต" (ไม่อิงลำดับตายตัว) — ใช้กับชีตที่มีการเพิ่มคอลัมน์ภายหลัง เช่น ptn
+ * textHeaders = คอลัมน์ที่ต้องเก็บเป็น "ข้อความ" ตามที่ส่งมาทุกตัวอักษร (เบอร์โทร รหัส ICD PTN)
+ * ไม่ใช้ sheet.appendRow เพราะต้องตั้งรูปแบบช่องเป็นข้อความ "ก่อน" เขียนค่าทุกครั้ง จึงจะแน่ใจได้ว่าชีตไม่แปลง
+ * "9339,9319" เป็นเลขตัวเดียว หรือตัดเลข 0 หน้าเบอร์โทร — ใช้ตัวล็อกกันสองคนบันทึกพร้อมกันแล้วเขียนทับแถวเดียวกัน
+ */
+function appendRowByHeaders_(name, obj, textHeaders) {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name);
-  const headers = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), 1)).getValues()[0];
-  sheet.appendRow(headers.map(h => (h !== '' && obj[h] !== undefined) ? obj[h] : ''));
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const headers = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), 1)).getValues()[0];
+    const row = sheet.getLastRow() + 1;
+    if (row > sheet.getMaxRows()) sheet.insertRowsAfter(sheet.getMaxRows(), 1);
+    (textHeaders || []).forEach(h => {
+      const i = headers.indexOf(h);
+      if (i !== -1) sheet.getRange(row, i + 1).setNumberFormat('@');
+    });
+    sheet.getRange(row, 1, 1, headers.length)
+      .setValues([headers.map(h => (h !== '' && obj[h] !== undefined) ? obj[h] : '')]);
+    SpreadsheetApp.flush();
+  } finally {
+    lock.releaseLock();
+  }
   invalidateCache_(name);
 }
+
+/** เขียนค่า 1 ช่องเป็นข้อความเสมอ (ตั้งรูปแบบช่องเป็นข้อความก่อนเขียน) */
+function setTextCell_(sheet, row, header, value) {
+  sheet.getRange(row, colIndex_(sheet, header)).setNumberFormat('@').setValue(String(value === undefined || value === null ? '' : value));
+}
+const APPT_TEXT_HEADERS = ['phone', 'icd10', 'icd9', 'ptn'];
 
 function deleteRow_(name, rowIndex) {
   SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name).deleteRow(rowIndex);
@@ -957,8 +986,8 @@ function updateAppointmentIcd_(payload) {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_APPTS);
   ensureColumns_(sheet, ['icd10', 'icd9']); // เผื่อยังไม่ได้รัน setupSheets ใหม่
   ensureApptTextColumns_(); // ไม่งั้น "9339,9319" จะถูกชีตแปลงเป็นเลขตัวเดียว
-  sheet.getRange(match._row, colIndex_(sheet, 'icd10')).setValue(icd10.join(','));
-  sheet.getRange(match._row, colIndex_(sheet, 'icd9')).setValue(icd9.join(','));
+  setTextCell_(sheet, match._row, 'icd10', icd10.join(','));
+  setTextCell_(sheet, match._row, 'icd9', icd9.join(','));
   invalidateCache_(SHEET_APPTS);
   return { ok: true };
 }
@@ -1010,14 +1039,14 @@ function updateAppointmentInfo_(payload) {
 
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_APPTS);
   const set = (col, val) => sheet.getRange(match._row, colIndex_(sheet, col)).setValue(val);
-  if (String(match.ptn || '') !== link.ptn) set('ptn', link.ptn);
+  if (String(match.ptn || '') !== link.ptn) setTextCell_(sheet, match._row, 'ptn', link.ptn);
   set('nationalId', nid);
   if (has('type')) set('type', payload.type);
   if (timeChanged) { set('startTime', payload.startTime); set('endTime', payload.endTime); }
   if (has('firstName')) set('firstName', String(payload.firstName).trim());
   if (has('lastName')) set('lastName', String(payload.lastName).trim());
   if (has('moo')) set('moo', String(payload.moo).trim());
-  if (has('phone')) set('phone', String(payload.phone || '').trim());
+  if (has('phone')) setTextCell_(sheet, match._row, 'phone', String(payload.phone || '').trim());
   if (has('note')) set('note', String(payload.note || '').trim());
   invalidateCache_(SHEET_APPTS);
   bumpCalendarVersion_();
@@ -1229,6 +1258,7 @@ function getPatients_() {
 /**
  * สรุปประวัติของคนไข้ 1 คน สำหรับแสดงในฟอร์มนัดเมื่อเลือกคนไข้เดิม
  * payload: { ptn, date, startTime } — date/startTime = นัดที่กำลังจะลง ใช้หาว่า "ครั้งก่อน" คือครั้งไหน
+ * payload.full = true (หน้าค้นหาคนไข้): history คือนัดทุกรายการของคนนี้รวมที่ยกเลิก พร้อมหมายเหตุ
  */
 function getPatientSummary_(payload) {
   const ptn = normText_(payload.ptn);
@@ -1248,7 +1278,8 @@ function getPatientSummary_(payload) {
       status: a.status,
       attended: !!a.attendedAt,
       icd10: icdCodes_(a.icd10),
-      icd9: icdCodes_(a.icd9, known9)
+      icd9: icdCodes_(a.icd9, known9),
+      note: normText_(a.note)
     });
   });
   const stamp = r => r.date + ' ' + r.startTime;
@@ -1262,11 +1293,16 @@ function getPatientSummary_(payload) {
   const ref = refDate + ' ' + (normText_(payload.startTime) || '99:99');
   const previous = active.find(r => stamp(r) < ref) || null;
   const pick = r => ({ date: r.date, startTime: r.startTime, endTime: r.endTime, type: r.type, attended: r.attended, icd10: r.icd10, icd9: r.icd9 });
+  const pickFull = r => Object.assign(pick(r), { status: r.status, note: r.note });
+  const HISTORY_LIMIT = 300;
+  const reg = patientsData_().find(p => normText_(p.ptn) === ptn);
 
   return {
     ok: true,
     data: {
       ptn: ptn,
+      patient: reg ? publicPatient_(reg) : null,
+      today: today,
       attendedCount: attended.length,
       appointmentCount: active.length,
       cancelledCount: rows.length - active.length,
@@ -1274,7 +1310,8 @@ function getPatientSummary_(payload) {
       lastVisit: attended.length ? attended[0].date : '',
       upcoming: upcoming.map(pick),
       previous: previous ? pick(previous) : null,
-      history: active.slice(0, 5).map(pick)
+      history: payload.full === true ? rows.slice(0, HISTORY_LIMIT).map(pickFull) : active.slice(0, 5).map(pick),
+      historyTotal: payload.full === true ? rows.length : active.length
     }
   };
 }
@@ -1615,7 +1652,7 @@ function addAppointment_(payload, auth) {
     icd10: icd10.join(','),
     icd9: icd9.join(','),
     ptn: link.ptn
-  });
+  }, APPT_TEXT_HEADERS);
 
   bumpCalendarVersion_();
   return { ok: true, ptn: link.ptn, isNewPatient: link.isNew, patient: link.patient };
@@ -1718,7 +1755,9 @@ function cmpMoo_(x, y) {
 
 /**
  * สรุปสถิติการให้บริการช่วง [from, to] (payload: {from:'yyyy-MM-dd', to:'yyyy-MM-dd'})
- * ไม่ส่งเบอร์/เลขบัตรของคนไข้กลับไป มีแต่ตัวเลขสรุป ยกเว้น byPatient ที่มี PTN และชื่อ (หน้านี้เปิดได้เฉพาะนักกายภาพ)
+ * ไม่ส่งชื่อ/เบอร์/เลขบัตรของคนไข้กลับไป มีแต่ตัวเลขสรุป (ดูรายคนใช้หน้า "ค้นหาคนไข้" แทน)
+ * เคส (ราย) = จำนวนคนไม่นับซ้ำที่มารับบริการในช่วง · visit (ครั้ง) = จำนวนครั้งที่มารับบริการในช่วง
+ * รายใหม่ = คนที่ "ครั้งแรกที่มารับบริการ" (นับจากข้อมูลทั้งหมดในระบบ) อยู่ในช่วงนี้ · รายเก่า = เคยมาก่อนช่วงนี้แล้ว
  * "ไม่มาตามนัด" นับเฉพาะนัดที่วันผ่านไปแล้ว และอยู่หลังวันแรกที่เริ่มมีการกด "มาแล้ว"
  * (นัดก่อนหน้านั้นไม่มีข้อมูลการมา จะนับเป็นไม่มาทั้งหมดไม่ได้)
  */
@@ -1764,10 +1803,20 @@ function getDashboard_(payload) {
   attended.forEach(a => { visitsByKey[a.key] = (visitsByKey[a.key] || 0) + 1; });
   const keys = Object.keys(visitsByKey);
 
+  // วันที่มารับบริการครั้งแรกของแต่ละคน (จากข้อมูลทั้งหมด ไม่ใช่เฉพาะช่วงที่กรอง) ใช้แยกรายใหม่/รายเก่า
+  const firstVisitOf = {};
+  rows.forEach(a => {
+    if (a.status !== 'active' || !a.attendedDate) return;
+    if (!firstVisitOf[a.key] || a.date < firstVisitOf[a.key]) firstVisitOf[a.key] = a.date;
+  });
+  const newCases = keys.filter(k => firstVisitOf[k] >= from && firstVisitOf[k] <= to).length;
+  const countCases = list => { const seen = {}; list.forEach(a => { seen[a.key] = true; }); return Object.keys(seen).length; };
+
   const byType = APPT_TYPES.map(t => ({
     name: t,
     total: active.filter(a => a.type === t).length,
-    attended: attended.filter(a => a.type === t).length
+    attended: attended.filter(a => a.type === t).length,
+    cases: countCases(attended.filter(a => a.type === t))
   }));
 
   const mooMap = {};
@@ -1779,20 +1828,6 @@ function getDashboard_(payload) {
   });
   const byMoo = Object.keys(mooMap).map(k => mooMap[k])
     .sort((x, y) => (y.attended - x.attended) || (y.total - x.total) || cmpMoo_(x.name, y.name));
-
-  // จำนวนครั้งรายคน (เฉพาะนัดที่ผูก PTN แล้ว) เรียงตามจำนวนครั้งที่มารับบริการ
-  const nameOfPtn = {};
-  patientsData_().forEach(p => { nameOfPtn[normText_(p.ptn)] = (normText_(p.firstName) + ' ' + normText_(p.lastName)).trim(); });
-  const patientMap = {};
-  active.forEach(a => {
-    if (!a.ptn) return;
-    if (!patientMap[a.ptn]) patientMap[a.ptn] = { ptn: a.ptn, name: nameOfPtn[a.ptn] || '', total: 0, attended: 0 };
-    patientMap[a.ptn].total++;
-    if (a.attendedDate) patientMap[a.ptn].attended++;
-  });
-  const allPatients = Object.keys(patientMap).map(k => patientMap[k])
-    .sort((x, y) => (y.attended - x.attended) || (y.total - x.total) || (x.ptn < y.ptn ? -1 : 1));
-  const BY_PATIENT_LIMIT = 30;
 
   // แยกตามคลินิก: ใช้การตั้งค่าคลินิก "ปัจจุบัน" ของแต่ละวันที่นัด
   const clinicCache = {};
@@ -1831,14 +1866,14 @@ function getDashboard_(payload) {
     for (let i = 0; i < spanDays; i++) {
       const k = addDaysStr_(from, i);
       idx[k] = trend.length;
-      trend.push({ key: k, total: 0, attended: 0 });
+      trend.push({ key: k, total: 0, attended: 0, cases: 0 });
     }
   } else {
     let cur = from.slice(0, 7);
     const endKey = to.slice(0, 7);
     while (cur <= endKey) {
       idx[cur] = trend.length;
-      trend.push({ key: cur, total: 0, attended: 0 });
+      trend.push({ key: cur, total: 0, attended: 0, cases: 0 });
       let y = Number(cur.slice(0, 4)), m = Number(cur.slice(5, 7)) + 1;
       if (m > 12) { m = 1; y++; }
       cur = y + '-' + String(m).padStart(2, '0');
@@ -1848,9 +1883,14 @@ function getDashboard_(payload) {
     const i = idx[granularity === 'day' ? a.date : a.date.slice(0, 7)];
     if (i !== undefined) {
       trend[i].total++;
-      if (a.attendedDate) trend[i].attended++;
+      if (a.attendedDate) {
+        trend[i].attended++;
+        if (!trend[i]._seen) trend[i]._seen = {};
+        if (!trend[i]._seen[a.key]) { trend[i]._seen[a.key] = true; trend[i].cases++; } // เคสไม่นับซ้ำภายในวัน/เดือนนั้น
+      }
     }
   });
+  trend.forEach(t => { delete t._seen; });
 
   return {
     ok: true,
@@ -1865,11 +1905,13 @@ function getDashboard_(payload) {
         trackedPast: tracked.length,
         attendanceRate,
         patientsSeen: keys.length,
-        repeatPatients: keys.filter(k => visitsByKey[k] >= 2).length
+        repeatPatients: keys.filter(k => visitsByKey[k] >= 2).length,
+        cases: keys.length,
+        visits: attended.length,
+        newCases: newCases,
+        returningCases: keys.length - newCases
       },
-      byType, byMoo, byClinic, byWeekday, trend,
-      byPatient: allPatients.slice(0, BY_PATIENT_LIMIT),
-      byPatientTotal: allPatients.length
+      byType, byMoo, byClinic, byWeekday, trend
     }
   };
 }

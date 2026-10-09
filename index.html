@@ -6,7 +6,7 @@
 <title>ทดสอบระบบนัดหมายผู้ป่วย รพ.สต.</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600;700&family=Noto+Serif+Thai:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=20261009b" />
+<link rel="stylesheet" href="style.css?v=20261010a" />
 </head>
 <body>
 
@@ -26,6 +26,7 @@
         <button type="submit">เข้าสู่ระบบ</button>
         <p id="loginError" class="error-text"></p>
       </form>
+      <div class="version-banner hidden"></div>
     </div>
   </section>
 
@@ -35,6 +36,7 @@
       <div class="brand">รพ.สต. <span>นัดหมาย</span></div>
       <nav>
         <button class="navBtn active" data-view="calendar">ปฏิทินนัดหมาย</button>
+        <button class="navBtn" data-view="patients">ค้นหาคนไข้</button>
         <button class="navBtn physio-only" data-view="dashboard">สถิติ</button>
         <button class="navBtn physio-only" data-view="settings">ตั้งค่า</button>
       </nav>
@@ -42,10 +44,12 @@
         <div class="who-name" id="whoName"></div>
         <div class="who-role" id="whoRole"></div>
         <button id="logoutBtn">ออกจากระบบ</button>
+        <div class="version-tag" id="versionTag"></div>
       </div>
     </aside>
 
     <main class="content">
+      <div class="version-banner hidden"></div>
       <!-- ปฏิทิน -->
       <section id="calendarView" class="view">
         <header class="view-head">
@@ -63,10 +67,33 @@
             <span class="legend-item"><i class="dot closed"></i>ปิดทำการ</span>
           </div>
         </header>
+        <!-- นัดวันนี้: กด "มาแล้ว" ได้จากหน้านี้เลย -->
+        <div id="todayPanel" class="today-panel hidden">
+          <div class="today-head">
+            <h3 id="todayTitle">นัดวันนี้</h3>
+            <span id="todayCount" class="today-count"></span>
+            <button type="button" id="todayRefreshBtn" class="link-btn">รีเฟรช</button>
+          </div>
+          <ul id="todayList" class="today-list"></ul>
+        </div>
+
         <div class="weekday-row">
           <span data-full="จันทร์" data-short="จ"></span><span data-full="อังคาร" data-short="อ"></span><span data-full="พุธ" data-short="พ"></span><span data-full="พฤหัสบดี" data-short="พฤ"></span><span data-full="ศุกร์" data-short="ศ"></span>
         </div>
         <div id="calendarGrid" class="calendar-grid"></div>
+      </section>
+
+      <!-- ค้นหาคนไข้: ข้อมูลและนัดทั้งหมดของคนไข้ 1 คน -->
+      <section id="patientsView" class="view hidden">
+        <header class="view-head">
+          <h2>ค้นหาคนไข้</h2>
+        </header>
+        <div class="patient-search">
+          <input type="search" id="patientSearchInput" placeholder="พิมพ์ชื่อ นามสกุล หรือ PTN (อย่างน้อย 2 ตัวอักษร)" autocomplete="off" />
+          <div id="patientSearchResults" class="patient-suggest hidden"></div>
+          <p id="patientSearchHint" class="panel-hint" style="margin:8px 0 0;"></p>
+        </div>
+        <div id="patientProfile"></div>
       </section>
 
       <!-- สถิติ (เฉพาะนักกายภาพ) -->
@@ -473,6 +500,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=20261009b"></script>
+  <script src="app.js?v=20261010a"></script>
 </body>
 </html>
