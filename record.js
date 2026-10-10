@@ -225,7 +225,8 @@ function recPart2_() {
       <select id="recFieldSel" class="l" aria-label="เลือกผลประเมินจาก AppSheet"></select>
       <button type="button" class="secondary rec-mini" id="recFieldApply">ดึงมาใส่แบบฟอร์ม</button>
       <span class="tx" id="recFieldNote"></span>
-      <input type="hidden" data-k="p2_as_id"><input type="hidden" data-k="p2_as_by"><input type="hidden" data-k="p2_as_date"></div>`),
+      <input type="hidden" data-k="p2_as_id"><input type="hidden" data-k="p2_as_by"><input type="hidden" data-k="p2_as_date"></div>
+      <div class="rec-field-stamp hidden" id="recFieldStamp"></div>`),
     rRow('เวลาที่ตรวจ', `<input type="time" data-k="p2_time" class="s2" aria-label="เวลาที่ตรวจ">`),
     rSub('Behavior of symptoms'),
     rRow('อาการ', rDD('p2_sym', 'symptom', 'อาการ'), rTx('of'), rDD('p2_sym_at', 'bodyPart', 'ตำแหน่ง')),
@@ -748,6 +749,7 @@ function recFieldInit_(isNew) {
   const list = REC.field || [];
   const row = document.getElementById('recFieldRow');
   if (!row) return;
+  recFieldStamp_();
   row.classList.toggle('hidden', !list.length);
   if (!list.length) return;
   const sel = document.getElementById('recFieldSel');
@@ -763,6 +765,21 @@ function recFieldInit_(isNew) {
   recApplyField_(same);
   note.textContent = 'เติมผลประเมินของวันนี้ให้แล้ว ตรวจค่าก่อนบันทึก';
 }
+/**
+ * บรรทัดบอกที่มาของผลที่ดึงมา: วันที่ประเมินจริง ผู้ประเมิน และแอปที่ใช้ (อ่านจากช่องที่บันทึกไปกับเวชระเบียน จึงยังโชว์เมื่อเปิดดูภายหลัง)
+ * ถ้าวันที่ประเมินไม่ตรงกับวันที่ของเวชระเบียนนี้ จะบอกไว้ด้วย
+ */
+function recFieldStamp_() {
+  const el = document.getElementById('recFieldStamp');
+  if (!el) return;
+  const get = k => { const f = recBody_().querySelector(`[data-k="${k}"]`); return f ? f.value : ''; };
+  const id = get('p2_as_id'), date = get('p2_as_date'), by = get('p2_as_by');
+  el.classList.toggle('hidden', !id || !date);
+  if (!id || !date) { el.textContent = ''; return; }
+  const other = REC.meta && REC.meta.date && REC.meta.date !== date;
+  el.innerHTML = `ผลที่ดึงมา: ประเมินเมื่อวันที่ <b>${esc_(fmtThaiDate_(date))}</b>` + (by ? ` · ผู้ประเมิน ${esc_(by)}` : '') +
+    ` · ${id.indexOf('hv:') === 0 ? 'แอปเยี่ยมบ้าน' : 'แอปประเมิน'}` + (other ? ` <span class="rec-field-other">คนละวันกับวันที่ของเวชระเบียนนี้ (${esc_(fmtThaiDate_(REC.meta.date))})</span>` : '');
+}
 /** เติมผลประเมินจากแอปลงแบบฟอร์ม (เฉพาะช่องที่ผลชุดนั้นมีค่า) และเปิดรายการที่มีค่าให้เห็น */
 function recApplyField_(a) {
   const body = recBody_();
@@ -776,6 +793,7 @@ function recApplyField_(a) {
   body.querySelector('[data-k="p2_as_id"]').value = a.id;
   body.querySelector('[data-k="p2_as_by"]').value = a.assessor || '';
   body.querySelector('[data-k="p2_as_date"]').value = a.date;
+  recFieldStamp_();
   body.querySelectorAll('.rec-pick').forEach(pick => {
     pick.querySelectorAll('.rec-pick-item.hidden').forEach(item => {
       if (!recItemHasData_(item)) return;
