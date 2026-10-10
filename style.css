@@ -1111,6 +1111,7 @@ label {
   --gold: #E2B354; --gold-deep: #B57E17;
   --d-s0: #EDF2EF; --d-s1: #D5EADF; --d-s2: #A9D5BF; --d-s3: #73B99B; --d-s4: #3F9B79; --d-s5: #1C785B; --d-s6: #0D5440;
   --d-bar-light: #B4D9C7; --d-bar-dark: #1C785B;
+  --d-pre: #87948E; --d-pre-soft: #D9DFDC;
   --d-warn: #A8501E; --d-warn-soft: #FBEADB; --d-up: #17694F; --d-down: #A8501E;
 }
 
@@ -1180,6 +1181,27 @@ label {
 /* แถบสรุป: ตัวเลขหลัก 1 ตัว + ตัวเลขรอง คั่นด้วยเส้นบาง */
 .dsum { display: grid; grid-template-columns: minmax(230px, 1.3fr) repeat(4, minmax(130px, 1fr)); }
 .dsum.dsum-3 { grid-template-columns: minmax(230px, 1.2fr) repeat(2, minmax(200px, 1fr)); }
+.dsum.dsum-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.dsum.dsum-in { border-bottom: 1px solid var(--line); margin-top: 10px; border-top: 1px solid var(--line); }
+.dsum.dsum-in .dsum-cell:first-child { background: none; border-radius: 0; }
+.dsum-cell .lb .dot, .dlegend i.dot { display: inline-block; width: 11px; height: 11px; border-radius: 50%; margin-right: 7px; vertical-align: -1px; }
+.dsum-cell .lb .dot.pre { background: var(--d-pre); } .dsum-cell .lb .dot.post { background: var(--d-bar-dark); }
+/* กราฟปวดก่อน-หลัง */
+.dpain-scroll { overflow-x: auto; }
+.dpain { width: 100%; height: auto; display: block; min-width: 600px; }
+.dpain text { font-family: var(--font-display); }
+.dpain .grid { stroke: var(--line); stroke-width: 1; }
+.dpain .sep { stroke: var(--line); stroke-width: 1; }
+.dpain .ax { fill: var(--ink-soft); font-size: 12px; }
+.dpain .nm { fill: var(--ink); font-size: 14px; } .dpain .nm.all { font-weight: 600; }
+.dpain .n { fill: var(--ink-soft); font-size: 12.5px; }
+.dpain .lv { fill: var(--ink-soft); font-size: 12.5px; } .dpain .lv .b { fill: var(--ink); font-weight: 600; }
+.dpain .rng { stroke-width: 7; stroke-linecap: round; }
+.dpain .rng.pre { stroke: var(--d-pre-soft); } .dpain .rng.post { stroke: var(--d-s2); }
+.dpain .avg { stroke: #fff; stroke-width: 2; }
+.dpain .avg.pre { fill: var(--d-pre); } .dpain .avg.post { fill: var(--d-bar-dark); }
+.dpain .hit { fill: transparent; }
+.dpain .hit:hover { fill: rgba(27,122,96,.06); }
 .dsum-cell { padding: 16px 18px; border-left: 1px solid var(--line); min-width: 0; }
 .dsum-cell:first-child { border-left: 0; background: linear-gradient(180deg, #F4FAF7, #FFFFFF); border-radius: 10px 0 0 10px; }
 .dsum-cell .lb, .dsplit .lb { font-size: 14.5px; color: var(--ink-soft); }
@@ -1307,7 +1329,9 @@ label {
 .dpanel[data-tab="sat"] .dash-section-title { margin-top: 0; }
 
 @media (max-width: 900px) {
-  .dsum, .dsum.dsum-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dsum, .dsum.dsum-3, .dsum.dsum-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dsum.dsum-4 .dsum-cell:first-child { grid-column: auto; border-radius: 0; }
+  .dsum.dsum-4 .dsum-cell:nth-child(odd) { border-left: 0; } .dsum.dsum-4 .dsum-cell:nth-child(even) { border-left: 1px solid var(--line); } .dsum.dsum-4 .dsum-cell:nth-child(-n+2) { border-top: 0; }
   .dsum-cell:first-child { grid-column: 1 / -1; border-radius: 10px 10px 0 0; }
   .dsum-cell { border-left: 0; border-top: 1px solid var(--line); } .dsum-cell:first-child { border-top: 0; }
   .dsum-cell:nth-child(odd):not(:first-child) { border-left: 1px solid var(--line); }

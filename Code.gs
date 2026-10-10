@@ -45,7 +45,7 @@ const PTN_FISCAL_YEAR = false; // false = นับปีตามปฏิท�
 
 // รุ่นของโค้ดหลังบ้าน — หน้าเว็บ (app.js) ใช้ค่านี้ตรวจว่าเว็บแอปถูกอัปเดตเป็นเวอร์ชันใหม่แล้วหรือยัง
 // (วางโค้ดใหม่ใน Apps Script แล้วแต่ยังไม่ได้กด "จัดการการทำให้ใช้งานได้ > เวอร์ชันใหม่" เว็บจะยังเรียกโค้ดรุ่นเก่าอยู่)
-const BACKEND_VERSION = '2026-10-13a';
+const BACKEND_VERSION = '2026-10-14a';
 
 const BUSY_TYPES = ['ประชุม', 'ทำเอกสาร', 'อบรม', 'ลา'];
 const APPT_TYPES = ['OPD', 'ลงชุมชน'];
@@ -2083,7 +2083,9 @@ function assessBelow_(test, value, age, sex, norms) {
  * สรุปผลจากเวชระเบียน (แบบประเมินครั้งแรก) ที่ "บันทึกเวชระเบียน" แล้ว และวันที่ประเมินอยู่ในช่วง [from, to]
  * ส่งกลับเฉพาะตัวเลขสรุป ไม่มีชื่อ PTN หรือค่าของรายคน
  *   records / patients / drafts (ฉบับร่างในช่วงนี้ ไม่ถูกนับ)
- *   nrs: { rest: {n, avg}, func: {n, avg} }            ระดับปวดแรกรับ
+ *   nrs: { rest: {n, avg, min, max}, func: {...} }     ระดับปวดแรกรับ
+ *   pain: ปวดก่อนและหลังรักษา (เฉพาะฉบับที่กรอกครบทั้งสองค่า) — all และ groups (แยกตาม PT diagnosis ถ้าไม่มีใช้ Medical diagnosis) รูปเดียวกัน:
+ *         { name, n, pre: {avg, min, max}, post: {avg, min, max}, drop (คะแนนเฉลี่ยที่ลดลง), pct (ร้อยละที่ลดลงจากค่าก่อนรักษา), improved, same, worse (จำนวนราย) }
  *   tests: [{ key, name, unit, tested, below, noCriterion }]  เฉพาะรายการที่มีคนถูกทดสอบในช่วงนี้
  *   barthel: { n, social, home, bed }                   12-20 / 5-11 / 0-4 คะแนน
  *   eq5d: { n, avg }
@@ -2093,7 +2095,7 @@ function getOutcomes_(payload, auth) {
   const from = String(payload.from || ''), to = String(payload.to || '');
   if (!re.test(from) || !re.test(to)) return { ok: false, error: 'รูปแบบวันที่ไม่ถูกต้อง' };
   if (from > to) return { ok: false, error: 'วันที่เริ่มต้องไม่เกินวันที่สิ้นสุด' };
-  const empty = { from: from, to: to, records: 0, patients: 0, drafts: 0, nrs: { rest: { n: 0, avg: null }, func: { n: 0, avg: null } }, tests: [], barthel: { n: 0, social: 0, home: 0, bed: 0 }, eq5d: { n: 0, avg: null } };
+  const empty = { from: from, to: to, records: 0, patients: 0, drafts: 0, nrs: { rest: { n: 0, avg: null, min: null, max: null }, func: { n: 0, avg: null, min: null, max: null } }, pain: { all: null, groups: [] }, tests: [], barthel: { n: 0, social: 0, home: 0, bed: 0 }, eq5d: { n: 0, avg: null } };
   if (!recSheet_(SHEET_RECORDS)) return { ok: true, data: empty };
 
   const tests = assessTestsAll_().filter(t => t.active && t.key !== 'eq5d' && t.key !== 'barthel');
@@ -2103,7 +2105,7 @@ function getOutcomes_(payload, auth) {
   const num = (v, lo, hi) => { const n = recNum_(typeof v === 'string' ? v.trim() : v); return n !== null && n >= lo && n <= hi ? n : null; };
   const mean = a => a.length ? Math.round(a.reduce((x, y) => x + y, 0) / a.length * 100) / 100 : null;
 
-  const out = empty, seen = {}, rest = [], func = [], eq = [];
+  const out = empty, seen = {}, rest = [], func = [], eq = [], pairs = [];
   const tally = {};
   tests.forEach(t => { tally[t.key] = { key: t.key, name: t.name, unit: t.unit, tested: 0, below: 0, noCriterion: 0 }; });
   recRows_(SHEET_RECORDS).forEach(r => {
@@ -2125,6 +2127,8 @@ function getOutcomes_(payload, auth) {
     const a = num(r.p2_nrs_rest, 0, 10), b = num(r.p2_nrs_func, 0, 10);
     if (a !== null) rest.push(a);
     if (b !== null) func.push(b);
+    const pre = num(r.p5_nrs_pre, 0, 10), post = num(r.p5_nrs_post, 0, 10);
+    if (pre !== null && post !== null) pairs.push({ group: normText_(r.p1_ptdx) || normText_(r.p1_mdx1) || 'ไม่ระบุการวินิจฉัย', pre: pre, post: post });
     tests.forEach(t => {
       const v = num(r['pt_' + t.key], 0, 99999);
       if (v === null) return;
@@ -2139,7 +2143,21 @@ function getOutcomes_(payload, auth) {
     if (e !== null) eq.push(e);
   });
   out.patients = Object.keys(seen).length;
-  out.nrs = { rest: { n: rest.length, avg: mean(rest) }, func: { n: func.length, avg: mean(func) } };
+  const stat = a => ({ n: a.length, avg: mean(a), min: a.length ? Math.min.apply(null, a) : null, max: a.length ? Math.max.apply(null, a) : null });
+  out.nrs = { rest: stat(rest), func: stat(func) };
+  // ปวดก่อน-หลังรักษา: ทั้งหมด + แยกกลุ่มการวินิจฉัย (6 กลุ่มที่มีมากสุด)
+  const painOf = (name, list) => {
+    const pre = stat(list.map(x => x.pre)), post = stat(list.map(x => x.post));
+    const drop = Math.round((pre.avg - post.avg) * 100) / 100;
+    return { name: name, n: list.length, pre: { avg: pre.avg, min: pre.min, max: pre.max }, post: { avg: post.avg, min: post.min, max: post.max },
+      drop: drop, pct: pre.avg > 0 ? Math.round(drop / pre.avg * 1000) / 10 : null,
+      improved: list.filter(x => x.post < x.pre).length, same: list.filter(x => x.post === x.pre).length, worse: list.filter(x => x.post > x.pre).length };
+  };
+  if (pairs.length) {
+    const byGroup = {};
+    pairs.forEach(x => { (byGroup[x.group] = byGroup[x.group] || []).push(x); });
+    out.pain = { all: painOf('ทั้งหมด', pairs), groups: Object.keys(byGroup).map(g => painOf(g.slice(0, 60), byGroup[g])).sort((x, y) => (y.n - x.n) || (x.name < y.name ? -1 : 1)).slice(0, 6) };
+  }
   out.tests = tests.map(t => tally[t.key]).filter(t => t.tested > 0);
   out.eq5d = { n: eq.length, avg: mean(eq) };
   if (out.records) recordLog_(auth, 'outcomes', '', '');
@@ -2553,7 +2571,7 @@ function saveRecord_(payload, auth) {
   const badNum = Object.keys(data).find(k => /^pt_/.test(k) && !/_label$/.test(k) &&
     (recNum_(data[k]) === null || recNum_(data[k]) < (k === 'pt_eq5d' ? -1 : 0) || recNum_(data[k]) > 99999));
   if (badNum) return { ok: false, error: 'ผลทดสอบต้องเป็นตัวเลข 0-99999: ' + badNum.slice(3) };
-  const badNrs = ['p2_nrs_rest', 'p2_nrs_func'].find(k => data[k] !== undefined && !/^(10|[0-9])$/.test(data[k]));
+  const badNrs = ['p2_nrs_rest', 'p2_nrs_func', 'p5_nrs_pre', 'p5_nrs_post'].find(k => data[k] !== undefined && !/^(10|[0-9])$/.test(data[k]));
   if (badNrs) return { ok: false, error: 'NRS ต้องเป็นเลข 0-10' };
   if (status === 'final' && !data.p1_cc) return { ok: false, error: 'กรอก Chief complaint ก่อนบันทึกเวชระเบียน (หรือกด บันทึกร่าง ไว้ก่อน)' };
   if (data.p1_consent !== undefined && data.p1_consent !== 'signed' && data.p1_consent !== 'verbal') return { ok: false, error: 'ค่าการยินยอมไม่ถูกต้อง' };

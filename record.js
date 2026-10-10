@@ -314,7 +314,11 @@ function recPart5_() {
     rPick('ex', 'เพิ่ม Exercise / Training', REC_EXERCISES.map(exs).concat(training)),
     rSub('Behavior'),
     rCRow('p5_behav', 'ปรับพฤติกรรม', rTx('all times')),
-    rCRow('p5_pa', 'Increase PA', rDD('p5_pa_min', 'paMinutes', 'นาที', 's'), rTx('นาที/วัน'), rDD('p5_pa_days', 'paDays', 'วัน', 's'), rTx('วัน/สัปดาห์'))
+    rCRow('p5_pa', 'Increase PA', rDD('p5_pa_min', 'paMinutes', 'นาที', 's'), rTx('นาที/วัน'), rDD('p5_pa_days', 'paDays', 'วัน', 's'), rTx('วัน/สัปดาห์')),
+    // ระดับปวดก่อนและหลังรักษาครั้งนี้: ใช้ทำกราฟผลลัพธ์ในหน้าสถิติ (กรอกครบทั้งสองช่องจึงถูกนับ)
+    rSub('Pain ก่อนและหลังรักษาครั้งนี้'),
+    rRow('NRS · ก่อนรักษา', rNrs('p5_nrs_pre', 'NRS ก่อนรักษา')),
+    rRow('NRS · หลังรักษา', rNrs('p5_nrs_post', 'NRS หลังรักษา'))
   ].join(''));
 }
 

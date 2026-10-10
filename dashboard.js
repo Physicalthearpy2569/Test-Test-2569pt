@@ -570,6 +570,45 @@ function dashMapDraw_(d) {
   paint();
 }
 
+/* ---------------- ปวดก่อน-หลังรักษา: เทา = ก่อน · เขียว = หลัง · จุด = ค่าเฉลี่ย · เส้น = ต่ำสุดถึงสูงสุด ---------------- */
+function dashPainHtml_(pain) {
+  const head = '<header><h3>ระดับความปวด ก่อนและหลังรักษา</h3><p class="dsub">NRS 0 ถึง 10 ยิ่งน้อยยิ่งดี จุดคือค่าเฉลี่ย เส้นคือช่วงต่ำสุดถึงสูงสุด แยกตามการวินิจฉัย</p></header>';
+  if (pain === undefined) return ''; // หลังบ้านรุ่นก่อน: ยังไม่มีข้อมูลส่วนนี้
+  if (!pain || !pain.all) {
+    return `<div class="dsheet">${head}<div class="dpad dash-empty">ช่วงนี้ยังไม่มีเวชระเบียนที่กรอก NRS ทั้งก่อนและหลังรักษา (ช่องอยู่ท้ายแบบฟอร์ม ส่วน Intervention)</div></div>`;
+  }
+  const a = pain.all;
+  const fmt = v => Number(v).toFixed(1);
+  const change = g => g.drop > 0 ? `ลดลง ${fmt(g.drop)} คะแนน${g.pct !== null ? ` (${g.pct.toFixed(0)}%)` : ''}` : (g.drop < 0 ? `เพิ่มขึ้น ${fmt(-g.drop)} คะแนน` : 'ไม่เปลี่ยน');
+  const rows = [a].concat(pain.groups.length > 1 || (pain.groups[0] && pain.groups[0].name !== 'ไม่ระบุการวินิจฉัย') ? pain.groups : []);
+  const W = 760, L = 200, R = 178, T = 12, rowH = 54, H = T + rowH * rows.length + 30, x = v => L + (W - L - R) * v / 10;
+  let svg = '';
+  for (let v = 0; v <= 10; v += 2) {
+    svg += `<line class="grid" x1="${x(v)}" x2="${x(v)}" y1="${T}" y2="${T + rowH * rows.length}"/><text class="ax" x="${x(v)}" y="${T + rowH * rows.length + 18}" text-anchor="middle">${v}</text>`;
+  }
+  rows.forEach((g, i) => {
+    const cy = T + rowH * i + rowH / 2, y1 = cy - 9, y2 = cy + 9;
+    const lane = (s, y, cls, label) => `<line class="rng ${cls}" x1="${x(s.min)}" x2="${x(s.max)}" y1="${y}" y2="${y}"/><circle class="avg ${cls}" cx="${x(s.avg)}" cy="${y}" r="6.5"/>
+      <text class="lv" x="${W - R + 14}" y="${y + 4}"><tspan class="b">${label} ${fmt(s.avg)}</tspan> (${s.min} ถึง ${s.max})</text>`;
+    svg += `${i ? `<line class="sep" x1="0" x2="${W}" y1="${T + rowH * i}" y2="${T + rowH * i}"/>` : ''}
+      <text class="nm${i ? '' : ' all'}" x="0" y="${cy - 4}">${esc_(g.name.length > 24 ? g.name.slice(0, 23) + '…' : g.name)}</text>
+      <text class="n" x="0" y="${cy + 14}">${g.n} ราย ${change(g)}</text>
+      ${lane(g.pre, y1, 'pre', 'ก่อน')}${lane(g.post, y2, 'post', 'หลัง')}
+      <rect class="hit" x="0" y="${T + rowH * i}" width="${W}" height="${rowH}" data-i="${i}"><title>${esc_(g.name)}: ${g.n} ราย ปวดลดลง ${g.improved} เท่าเดิม ${g.same} เพิ่มขึ้น ${g.worse}</title></rect>`;
+  });
+  return `<div class="dsheet">${head}
+    <div class="dsum dsum-4 dsum-in">
+      <div class="dsum-cell"><div class="lb"><i class="dot pre"></i>ก่อนรักษา เฉลี่ย</div><div class="num"><span data-count="${a.pre.avg}" data-dec="1">${fmt(a.pre.avg)}</span><small>จาก 10</small></div><div class="note">ต่ำสุด ${a.pre.min} สูงสุด ${a.pre.max}</div></div>
+      <div class="dsum-cell"><div class="lb"><i class="dot post"></i>หลังรักษา เฉลี่ย</div><div class="num"><span data-count="${a.post.avg}" data-dec="1">${fmt(a.post.avg)}</span><small>จาก 10</small></div><div class="note">ต่ำสุด ${a.post.min} สูงสุด ${a.post.max}</div></div>
+      <div class="dsum-cell"><div class="lb">ความปวด${a.drop < 0 ? 'เพิ่มขึ้น' : 'ลดลง'}เฉลี่ย</div><div class="num">${a.pct === null ? '<span>-</span>' : `<span data-count="${Math.abs(a.pct)}" data-dec="1">${Math.abs(a.pct).toFixed(1)}</span><small>%</small>`}</div><div class="note">${fmt(Math.abs(a.drop))} คะแนน จาก ${a.n} ราย</div></div>
+      <div class="dsum-cell"><div class="lb">ผู้ที่ปวดลดลงหลังรักษา</div><div class="num"><span data-count="${Math.round(a.improved / a.n * 100)}">${Math.round(a.improved / a.n * 100)}</span><small>%</small></div><div class="note">${a.improved} จาก ${a.n} ราย เท่าเดิม ${a.same} เพิ่มขึ้น ${a.worse}</div></div>
+    </div>
+    <div class="dpad">
+      <div class="dlegend"><span><i class="dot" style="background:var(--d-pre)"></i>ก่อนรักษา</span><span><i class="dot" style="background:var(--d-bar-dark)"></i>หลังรักษา</span></div>
+      <div class="dpain-scroll"><svg class="dpain" viewBox="0 0 ${W} ${H}" role="img" aria-label="ระดับความปวดเฉลี่ยก่อนรักษา ${fmt(a.pre.avg)} หลังรักษา ${fmt(a.post.avg)} จาก ${a.n} ราย">${svg}</svg></div>
+    </div></div>`;
+}
+
 /* ---------------- มุมมอง 3: ผลลัพธ์การรักษา (จากเวชระเบียน โหลดเมื่อเปิดแท็บ) ---------------- */
 async function dashLoadOutcomes_() {
   const d = DASH.data, host = document.getElementById('dashOut');
@@ -591,13 +630,13 @@ async function dashLoadOutcomes_() {
   if (DASH.tab === 'out') dashAnimate_(host.closest('.dpanel'));
 }
 function dashOutcomesHtml_(o) {
-  const note = '<div class="dinfo">ระดับปวดก่อนและหลังรักษา และร้อยละที่ดีขึ้น จะมีเมื่อเริ่มบันทึก progress note ตอนนี้แสดงผลจากแบบประเมินครั้งแรกในเวชระเบียนที่กด "บันทึกเวชระเบียน" แล้ว</div>';
+  const note = '<div class="dinfo">ตัวเลขในแท็บนี้มาจากเวชระเบียน (แบบประเมินครั้งแรก) ที่กด "บันทึกเวชระเบียน" แล้ว ผลของการมาครั้งต่อ ๆ ไปจะนับรวมเมื่อเริ่มบันทึก progress note</div>';
   if (!o.records) {
     return `${note}<div class="dsheet"><div class="dpad dash-empty">ช่วงนี้ยังไม่มีเวชระเบียนที่บันทึกแล้ว${o.drafts ? ` (มีฉบับร่าง ${o.drafts} ฉบับ ยังไม่ถูกนับ)` : ''}</div></div>`;
   }
   const fig = (v, n, unitText, dec) => v === null || v === undefined ? '<div class="dfig"><span>-</span></div><div class="note">ยังไม่มีข้อมูล</div>'
     : `<div class="dfig"><span data-count="${v}" data-dec="${dec}">${Number(v).toFixed(dec)}</span><small>${unitText}</small></div><div class="note">จาก ${n} ราย</div>`;
-  const nrsCell = (title, x) => `<div class="dsum-cell"><div class="lb">${title}</div>${fig(x.avg, x.n, 'จาก 10', 1)}${x.avg === null ? '' : `<div class="dmeter" role="img" aria-label="${x.avg} จาก 10"><i data-w="${(x.avg * 10).toFixed(1)}"></i></div>`}</div>`;
+  const nrsCell = (title, x) => `<div class="dsum-cell"><div class="lb">${title}</div>${fig(x.avg, x.n, 'จาก 10', 1)}${x.avg === null ? '' : `<div class="dmeter" role="img" aria-label="${x.avg} จาก 10"><i data-w="${(x.avg * 10).toFixed(1)}"></i></div>${x.min !== null && x.min !== undefined ? `<div class="note">ต่ำสุด ${x.min} สูงสุด ${x.max}</div>` : ''}`}</div>`;
   const tests = o.tests.slice().sort((a, b) => (b.tested - b.noCriterion ? b.below / (b.tested - b.noCriterion) : -1) - (a.tested - a.noCriterion ? a.below / (a.tested - a.noCriterion) : -1));
   const testRows = tests.map(t => {
     const judged = t.tested - t.noCriterion;
@@ -613,6 +652,7 @@ function dashOutcomesHtml_(o) {
       ${nrsCell('ระดับปวดแรกรับ ขณะพัก (NRS เฉลี่ย)', o.nrs.rest)}
       ${nrsCell('ระดับปวดแรกรับ ขณะใช้งาน (NRS เฉลี่ย)', o.nrs.func)}
     </div>
+    ${dashPainHtml_(o.pain)}
     <div class="dcols">
       <div class="dsheet"><header><h3>ผลทดสอบสมรรถภาพที่ต่ำกว่าเกณฑ์</h3><p class="dsub">จำนวนรายที่ต่ำกว่าเกณฑ์ จากผู้ที่ได้ทดสอบและมีเกณฑ์เทียบ</p></header>
         <div class="dpad">${testRows ? `<div class="dhb dhb-wide">${testRows}</div>` : '<div class="dash-empty">ช่วงนี้ยังไม่มีผลทดสอบสมรรถภาพ</div>'}</div></div>
