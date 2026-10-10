@@ -45,7 +45,7 @@ const PTN_FISCAL_YEAR = false; // false = นับปีตามปฏิท�
 
 // รุ่นของโค้ดหลังบ้าน — หน้าเว็บ (app.js) ใช้ค่านี้ตรวจว่าเว็บแอปถูกอัปเดตเป็นเวอร์ชันใหม่แล้วหรือยัง
 // (วางโค้ดใหม่ใน Apps Script แล้วแต่ยังไม่ได้กด "จัดการการทำให้ใช้งานได้ > เวอร์ชันใหม่" เว็บจะยังเรียกโค้ดรุ่นเก่าอยู่)
-const BACKEND_VERSION = '2026-10-10e';
+const BACKEND_VERSION = '2026-10-10f';
 
 const BUSY_TYPES = ['ประชุม', 'ทำเอกสาร', 'อบรม', 'ลา'];
 const APPT_TYPES = ['OPD', 'ลงชุมชน'];
@@ -221,10 +221,11 @@ function route_(action, payload) {
     case 'getPatients': return getPatients_();
     case 'getPatientSummary': return getPatientSummary_(payload);
     case 'getRecordSetup': return requirePhysio_(auth, () => getRecordSetup_());
-    case 'getPatientRecords': return requirePhysio_(auth, () => getPatientRecords_(payload));
-    case 'getRecord': return requirePhysio_(auth, () => getRecord_(payload));
+    case 'getPatientRecords': return requirePhysio_(auth, () => getPatientRecords_(payload, auth));
+    case 'getRecentRecords': return requirePhysio_(auth, () => getRecentRecords_(auth));
+    case 'getRecord': return requirePhysio_(auth, () => getRecord_(payload, auth));
     case 'saveRecord': return requirePhysio_(auth, () => saveRecord_(payload, auth));
-    case 'deleteRecord': return requirePhysio_(auth, () => deleteRecord_(payload));
+    case 'deleteRecord': return requirePhysio_(auth, () => deleteRecord_(payload, auth));
 
     case 'getSettingsBundle': return requirePhysio_(auth, () => getSettingsBundle_());
     case 'getSchedule': return requirePhysio_(auth, () => getSchedule_());
@@ -331,10 +332,27 @@ function output_(obj, callback) {
 
 /* ---------------------------- Auth ---------------------------- */
 
+// ใส่รหัสผ่านผิดติดกันเกินจำนวนนี้ บัญชีนั้นถูกล็อกชั่วคราว (กันการเดารหัสผ่านไปเรื่อย ๆ)
+const LOGIN_MAX_FAILS = 5;
+const LOGIN_LOCK_SEC = 900;
+const DEFAULT_PASSWORD = 'changeme123';
+
 function login_(payload) {
+  const username = String(payload.username === undefined || payload.username === null ? '' : payload.username);
+  const password = String(payload.password === undefined || payload.password === null ? '' : payload.password);
+  const cache = CacheService.getScriptCache();
+  const failKey = 'loginfail_' + username.toLowerCase().slice(0, 80);
+  let fails = 0;
+  try { fails = Number(cache.get(failKey) || 0); } catch (e) { /* แคชใช้ไม่ได้ก็ไม่ล็อก */ }
+  if (fails >= LOGIN_MAX_FAILS) return { ok: false, error: 'ใส่รหัสผ่านผิดหลายครั้ง บัญชีนี้ถูกล็อกชั่วคราว 15 นาที แล้วค่อยลองใหม่' };
+
   const rows = sheetData_(SHEET_USERS);
-  const u = rows.find(r => r.username === payload.username && r.password === payload.password);
-  if (!u) return { ok: false, error: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' };
+  const u = (username && password) ? rows.find(r => String(r.username) === username && String(r.password) === password) : null;
+  if (!u) {
+    try { cache.put(failKey, String(fails + 1), LOGIN_LOCK_SEC); } catch (e) { /* ไม่เป็นไร */ }
+    return { ok: false, error: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' };
+  }
+  try { cache.remove(failKey); } catch (e) { /* ไม่เป็นไร */ }
 
   const exp = Date.now() + 1000 * 60 * 60 * 12; // token อายุ 12 ชม.
   const raw = `${u.username}|${u.role}|${exp}`;
@@ -343,7 +361,9 @@ function login_(payload) {
     ok: true,
     token: `${raw}|${sig}`,
     role: u.role,
-    displayName: u.displayName
+    displayName: u.displayName,
+    // ยังใช้รหัสผ่านเริ่มต้นหรือสั้นเกินไป: หน้าเว็บจะเตือนให้เปลี่ยน
+    weakPassword: password === DEFAULT_PASSWORD || password.length < 8
   };
 }
 
@@ -2274,6 +2294,25 @@ function setPatientExtra_(ptn, extra) {
   return '';
 }
 
+/**
+ * บันทึกการเข้าถึงเวชระเบียน (ชีต RecordLog): ใคร ทำอะไร กับเวชระเบียนของใคร เมื่อไร
+ * action: list = เปิดรายการเวชระเบียนของคนไข้ · recent = เปิดเมนูเวชระเบียน · view = เปิดอ่าน · create / update / delete
+ * เขียนไม่สำเร็จก็ไม่ขวางงานรักษา (ไม่โยนข้อผิดพลาดต่อ)
+ */
+const SHEET_RECORD_LOG = 'RecordLog';
+function recordLog_(auth, action, recordId, ptn) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    let sheet = ss.getSheetByName(SHEET_RECORD_LOG);
+    if (!sheet) {
+      sheet = ss.insertSheet(SHEET_RECORD_LOG);
+      sheet.getRange(1, 1, 1, 5).setValues([['time', 'user', 'action', 'recordId', 'ptn']]);
+      sheet.setFrozenRows(1);
+    }
+    sheet.appendRow([new Date(), String((auth && auth.username) || ''), action, String(recordId || ''), String(ptn || '')]);
+  } catch (e) { /* บันทึกการเข้าถึงเป็นงานเสริม */ }
+}
+
 function recordMeta_(r) {
   return { id: normText_(r.id), ptn: normText_(r.ptn), session: recNum_(r.session) || 0, kind: normText_(r.kind) || 'initial', date: recDate_(r.date),
     status: normText_(r.status) === 'final' ? 'final' : 'draft', createdAt: normText_(r.createdAt instanceof Date ? r.createdAt.toISOString() : r.createdAt),
@@ -2285,7 +2324,7 @@ function recordCell_(v) {
 }
 
 /** รายการเวชระเบียนของคนไข้ 1 คน (ใหม่สุดก่อน) — payload: { ptn } */
-function getPatientRecords_(payload) {
+function getPatientRecords_(payload, auth) {
   const ptn = normText_(payload.ptn);
   if (!ptn) return { ok: false, error: 'ไม่ได้ระบุ PTN' };
   const reg = patientsData_().find(p => normText_(p.ptn) === ptn);
@@ -2297,11 +2336,26 @@ function getPatientRecords_(payload) {
     m.ptDx = recordCell_(r.p1_ptdx);
     return m;
   }).sort((a, b) => (b.session - a.session) || (a.date < b.date ? 1 : -1));
+  if (records.length) recordLog_(auth, 'list', '', ptn);
   return { ok: true, data: { ptn: ptn, today: todayStr_(), patient: recordPatient_(reg), records: records } };
 }
 
+/** เวชระเบียนที่บันทึก/แก้ไขล่าสุดของทุกคน (ใหม่สุดก่อน สูงสุด 40 ชุด) พร้อมชื่อคนไข้ — ใช้ในเมนูเวชระเบียน */
+function getRecentRecords_(auth) {
+  const names = {};
+  patientsData_().forEach(p => { names[normText_(p.ptn)] = publicPatient_(p); });
+  const records = recRows_(SHEET_RECORDS).filter(r => normText_(r.id) && normText_(r.ptn)).map(r => {
+    const m = recordMeta_(r);
+    const p = names[m.ptn];
+    return { id: m.id, ptn: m.ptn, firstName: p ? p.firstName : '', lastName: p ? p.lastName : '', session: m.session, date: m.date, status: m.status,
+      chiefComplaint: recordCell_(r.p1_cc), stamp: m.updatedAt || m.createdAt };
+  }).sort((a, b) => a.stamp < b.stamp ? 1 : (a.stamp > b.stamp ? -1 : 0));
+  if (records.length) recordLog_(auth, 'recent', '', '');
+  return { ok: true, data: { total: records.length, drafts: records.filter(r => r.status !== 'final').length, records: records.slice(0, 40) } };
+}
+
 /** เวชระเบียน 1 ชุดพร้อมทุกช่องในแบบฟอร์ม — payload: { id } */
-function getRecord_(payload) {
+function getRecord_(payload, auth) {
   const id = normText_(payload.id);
   const row = id ? recRows_(SHEET_RECORDS).find(r => normText_(r.id) === id) : null;
   if (!row) return { ok: false, error: 'ไม่พบเวชระเบียนนี้' };
@@ -2313,6 +2367,7 @@ function getRecord_(payload) {
     if (v !== '') data[k] = v;
   });
   const reg = patientsData_().find(p => normText_(p.ptn) === meta.ptn);
+  recordLog_(auth, 'view', meta.id, meta.ptn);
   return { ok: true, data: { record: Object.assign(meta, { data: data }), patient: reg ? recordPatient_(reg) : null, today: todayStr_() } };
 }
 
@@ -2346,11 +2401,15 @@ function saveRecord_(payload, auth) {
     if (v !== '') data[k] = v;
   }
   // ผลทดสอบสมรรถภาพต้องเป็นตัวเลข (ช่องชื่อแบบสอบถามลงท้าย _label เป็นข้อความได้)
-  const badNum = Object.keys(data).find(k => /^pt_/.test(k) && !/_label$/.test(k) && (recNum_(data[k]) === null || recNum_(data[k]) < 0 || recNum_(data[k]) > 99999));
+  // (คะแนนอรรถประโยชน์ EQ-5D-5L ติดลบได้ ต่ำสุดประมาณ -0.283 = สภาวะที่แย่กว่าเสียชีวิต)
+  const badNum = Object.keys(data).find(k => /^pt_/.test(k) && !/_label$/.test(k) &&
+    (recNum_(data[k]) === null || recNum_(data[k]) < (k === 'pt_eq5d' ? -1 : 0) || recNum_(data[k]) > 99999));
   if (badNum) return { ok: false, error: 'ผลทดสอบต้องเป็นตัวเลข 0-99999: ' + badNum.slice(3) };
   const badNrs = ['p2_nrs_rest', 'p2_nrs_func'].find(k => data[k] !== undefined && !/^(10|[0-9])$/.test(data[k]));
   if (badNrs) return { ok: false, error: 'NRS ต้องเป็นเลข 0-10' };
   if (status === 'final' && !data.p1_cc) return { ok: false, error: 'กรอก Chief complaint ก่อนบันทึกเวชระเบียน (หรือกด บันทึกร่าง ไว้ก่อน)' };
+  if (data.p1_consent !== undefined && data.p1_consent !== 'signed' && data.p1_consent !== 'verbal') return { ok: false, error: 'ค่าการยินยอมไม่ถูกต้อง' };
+  if (status === 'final' && !data.p1_consent) return { ok: false, error: 'บันทึกการยินยอมของคนไข้ก่อนบันทึกเวชระเบียน (หรือกด บันทึกร่าง ไว้ก่อน)' };
 
   const lock = LockService.getScriptLock();
   lock.waitLock(20000);
@@ -2395,12 +2454,14 @@ function saveRecord_(payload, auth) {
     lock.releaseLock();
     invalidateCache_(SHEET_RECORDS);
   }
+  recordLog_(auth, updated ? 'update' : 'create', id, ptn);
   return { ok: true, data: { id: id, session: session, status: status, updated: updated } };
 }
 
 /** ลบเวชระเบียน — ลบได้เฉพาะฉบับร่าง (ฉบับที่บันทึกแล้วแก้ไขได้แต่ลบจากหน้าเว็บไม่ได้) */
-function deleteRecord_(payload) {
+function deleteRecord_(payload, auth) {
   const id = normText_(payload.id);
+  let ptn = '';
   const sheet = recSheet_(SHEET_RECORDS);
   if (!id || !sheet) return { ok: false, error: 'ไม่พบเวชระเบียนนี้' };
   const lock = LockService.getScriptLock();
@@ -2410,12 +2471,14 @@ function deleteRecord_(payload) {
     const row = sheetData_(SHEET_RECORDS).find(r => normText_(r.id) === id);
     if (!row) return { ok: false, error: 'ไม่พบเวชระเบียนนี้ (อาจถูกลบไปแล้ว)' };
     if (normText_(row.status) === 'final') return { ok: false, error: 'ลบได้เฉพาะฉบับร่าง เวชระเบียนที่บันทึกแล้วลบจากหน้าเว็บไม่ได้' };
+    ptn = normText_(row.ptn);
     sheet.deleteRow(row._row);
     SpreadsheetApp.flush();
   } finally {
     lock.releaseLock();
     invalidateCache_(SHEET_RECORDS);
   }
+  recordLog_(auth, 'delete', id, ptn);
   return { ok: true };
 }
 
@@ -2498,7 +2561,7 @@ function setupSatisfactionForm() {
 
 const SYSTEM_SHEETS_ = [SHEET_USERS, SHEET_SCHEDULE, SHEET_SCHEDULE_SLOTS, SHEET_CLOSED, SHEET_BUSY, SHEET_APPTS, SHEET_CLINIC_TYPES,
   SHEET_CLINIC_DAYS, SHEET_CLINIC_RULES, SHEET_SPECIAL_OPEN, SHEET_SPECIAL_SLOTS, SHEET_ICD10, SHEET_ICD9, SHEET_EXTRA_SLOTS, SHEET_BUSY_RULES, SHEET_PATIENTS,
-  'Records', 'RecordOptions', 'AssessTests', 'AssessNorms'];
+  'Records', 'RecordOptions', 'AssessTests', 'AssessNorms', 'RecordLog'];
 
 /** หาแท็บคำตอบของแบบประเมิน: แท็บที่ลิงก์กับ Google Form (หรือแท็บที่หัวคอลัมน์แรกเป็น "ประทับเวลา"/"Timestamp") */
 function findFeedbackSheet_() {

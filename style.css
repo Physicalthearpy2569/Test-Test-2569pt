@@ -945,7 +945,8 @@ label {
   /* มีเมนู 4 รายการแล้ว: ให้เมนูลงไปอยู่บรรทัดที่สองใต้ชื่อระบบ แต่ละปุ่มอยู่บรรทัดเดียว ไม่ตัดคำ */
   .sidebar { flex-wrap: wrap; row-gap: 6px; }
   .sidebar nav { flex-basis: 100%; justify-content: space-between; gap: 4px; }
-  .navBtn { white-space: nowrap; padding: 8px 8px; font-size: 14px; flex: 1 1 auto; }
+  .navBtn { white-space: nowrap; padding: 8px 6px; font-size: 14px; flex: 1 1 auto; }
+  .nav-long { display: none; } /* เมนู 5 รายการ: ย่อเป็น "ปฏิทิน" "ค้นหา" ให้พอดีบรรทัดเดียว */
 
   .today-list { grid-template-columns: 1fr; }
   .today-item .appt-attend { padding: 9px 12px; }
@@ -976,8 +977,17 @@ label {
 #recAgeTyped { width: 80px; }
 .rec-mini { padding: 6px 12px; font-size: 14px; font-weight: 600; }
 .rec-steps { position: sticky; top: 0; z-index: 5; display: flex; gap: 6px; flex-wrap: wrap; padding: 8px 0; margin-bottom: 4px; background: var(--bg); }
-.rec-steps button { padding: 7px 14px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); font-size: 14px; white-space: nowrap; color: var(--ink); }
-.rec-steps button:hover, .rec-steps button:focus-visible { border-color: var(--teal); color: var(--teal-dark); outline: none; }
+.rec-steps button { display: inline-flex; align-items: center; gap: 7px; padding: 5px 14px 5px 5px; border-radius: 999px; border: 1px solid #B9D3C4; background: var(--teal-tint); font-size: 14px; font-weight: 600; white-space: nowrap; color: var(--teal-dark); }
+.rec-steps button .n { width: 24px; height: 24px; border-radius: 50%; background: var(--teal); color: #fff; font-size: 13px; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; }
+.rec-steps button:hover, .rec-steps button:focus-visible { border-color: var(--teal); background: #D3E4D9; outline: none; }
+.rec-steps button.on { background: var(--teal); border-color: var(--teal); color: #fff; }
+.rec-steps button.on .n { background: #fff; color: var(--teal-dark); }
+.quick-card-record { margin: 8px 0 0; padding: 9px 14px; font-size: 15px; }
+.rec-link { color: var(--teal-dark); font-weight: 600; text-decoration: underline; padding: 0; font-size: inherit; text-align: left; }
+.rec-ptn { display: block; color: var(--ink-soft); font-size: 12.5px; }
+/* ปุ่มเปิดเวชระเบียนในรายละเอียดนัด: ต้องเด่นกว่าปุ่มอื่นในหน้าต่างเดียวกัน */
+.record-btn { display: block; width: 100%; margin-bottom: 14px; padding: 12px 16px; border-radius: 10px; background: var(--teal); color: #fff; font-size: 16px; font-weight: 700; text-align: center; box-shadow: 0 2px 8px rgba(47,110,82,0.28); }
+.record-btn:hover, .record-btn:focus-visible { background: var(--teal-dark); outline: none; }
 .rec-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; margin-bottom: 14px; scroll-margin-top: 56px; }
 .rec-card > h3 { margin: 0 0 10px; font-size: 17px; display: flex; align-items: center; gap: 8px; }
 .rec-card > h3 .n { width: 26px; height: 26px; border-radius: 50%; background: var(--teal); color: #fff; font-size: 14px; display: inline-flex; align-items: center; justify-content: center; }
@@ -998,10 +1008,53 @@ label {
 .rec-row textarea { resize: vertical; line-height: 1.5; }
 .rec-row select:invalid, .rec-row select.rec-dd { color: var(--ink); }
 .rec-row .tx { font-size: 14px; color: var(--ink-soft); }
+/* จัด 2 คอลัมน์บนจอกว้าง: แถวสั้นกินครึ่งเดียว แถวที่มีหลายช่อง (.wide) กินเต็ม มีเส้นแบ่งกลางระหว่างคอลัมน์ */
+.rec-grid { display: grid; grid-template-columns: minmax(0, 1fr); column-gap: 36px; }
+.rec-grid > .wide, .rec-grid > .rec-sub, .rec-grid > .rec-pick { grid-column: 1 / -1; }
+.rec-grid > .rec-row { border-bottom: 1px dashed var(--line); }
+@media (min-width: 1200px) {
+  .rec-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); background: linear-gradient(var(--line), var(--line)) center top / 1px 100% no-repeat; }
+  .rec-grid > .wide, .rec-grid > .rec-pick { background-color: var(--surface); }
+  .rec-grid > .rec-row:not(.wide) > .lb { flex-basis: 132px; }
+  .rec-grid > .rec-row:not(.wide) > label.ck.lead { flex: 0 1 auto; max-width: 100%; }
+}
+/* ส่วนย่อยที่ขึ้นมาเมื่อติ๊ก/เลือก */
+.rec-extra { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; flex: 1 1 220px; min-width: 0; }
+.rec-lead-hidden { display: none; }
+/* รายการที่เลือกจากดรอปดาวน์แล้วค่อยขึ้นให้กรอก */
+.rec-pick-bar { padding: 8px 0 6px; }
+.rec-pick-add { width: 100%; max-width: 380px; padding: 9px 12px; font-size: 15px; font-weight: 600; font-family: inherit; color: var(--teal-dark);
+  background: var(--teal-tint); border: 1px dashed var(--teal); border-radius: 9px; cursor: pointer; }
+.rec-pick-add:hover, .rec-pick-add:focus-visible { background: #D3E4D9; outline: none; }
+.rec-pick-item { position: relative; padding-right: 40px; }
+.rec-pick-x { position: absolute; top: 7px; right: 0; width: 30px; height: 30px; border-radius: 50%; border: 1px solid var(--line); background: var(--surface); color: var(--ink-soft); font-size: 13px; line-height: 1; padding: 0; }
+.rec-pick-x:hover, .rec-pick-x:focus-visible { border-color: var(--danger); color: var(--danger); outline: none; }
+.rec-pick-block { padding: 0; margin: 4px 0; }
+.rec-pick-block > .rec-details { margin: 0; padding-right: 0; }
+.rec-pick-block > .rec-details > summary { padding-right: 46px; }
+.rec-pick-block > .rec-pick-x { top: 8px; right: 10px; }
 .rec-grp { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
-.rec-nrs { display: inline-grid; grid-template-columns: repeat(11, 32px); gap: 3px; }
-.rec-nrs button { height: 32px; border: 1px solid var(--line); border-radius: 7px; font-size: 14px; background: var(--surface); color: var(--ink); padding: 0; }
+.rec-nrs { display: inline-grid; grid-template-columns: repeat(11, minmax(0, 32px)); gap: 3px; flex: 0 1 382px; min-width: 0; }
+.rec-nrs button { height: 32px; min-width: 0; border: 1px solid var(--line); border-radius: 7px; font-size: 14px; background: var(--surface); color: var(--ink); padding: 0; }
 .rec-nrs button.on { background: var(--teal); border-color: var(--teal); color: #fff; font-weight: 700; }
+.rec-opts { display: flex; flex-wrap: wrap; gap: 6px; flex: 1 1 320px; min-width: 0; }
+.rec-opts button { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); padding: 6px 10px; font-size: 14px; text-align: left; line-height: 1.4; min-height: 34px; }
+.rec-opts button b { display: inline-block; min-width: 14px; color: var(--teal-dark); }
+.rec-opts button:hover { border-color: var(--teal); }
+.rec-opts button.on { background: var(--teal); border-color: var(--teal); color: #fff; }
+.rec-opts button.on b { color: #fff; }
+.rec-details { border: 1px solid var(--line); border-radius: 12px; margin: 8px 0; padding: 0 14px; background: var(--surface); }
+.rec-details > summary { cursor: pointer; padding: 11px 0; font-size: 15px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; list-style: none; }
+.rec-details > summary::-webkit-details-marker { display: none; }
+.rec-details > summary::before { content: '▸'; color: var(--ink-soft); font-size: 13px; }
+.rec-details[open] > summary::before { content: '▾'; }
+.rec-details[open] > summary { border-bottom: 1px solid var(--line); }
+.rec-details-sum { font-size: 14px; color: var(--ink-soft); }
+.rec-details-sum.done { color: var(--teal-dark); font-weight: 600; }
+.rec-details-sum.bad { color: var(--danger); }
+.rec-details .rec-row:last-of-type { border-bottom: 0; }
+.rec-barthel > .lb { align-self: flex-start; padding-top: 6px; }
+.rec-row > .lb small { display: block; font-weight: 400; font-size: 12.5px; color: var(--ink-soft); line-height: 1.4; }
 .rec-crit { font-size: 13px; color: var(--ink-soft); flex: 1 1 200px; min-width: 0; }
 .rec-crit.bad { color: var(--danger); font-weight: 600; }
 .rec-crit.good { color: var(--success); font-weight: 600; }
@@ -1022,11 +1075,20 @@ label {
   .rec-card { padding: 14px 12px; }
   .rec-sub { margin-left: -12px; margin-right: -12px; padding-left: 12px; padding-right: 12px; }
   .rec-row > .lb, .rec-row label.ck.lead { flex: 1 1 100%; }
-  .rec-nrs { grid-template-columns: repeat(11, minmax(0, 1fr)); width: 100%; }
+  .rec-nrs { grid-template-columns: repeat(11, minmax(0, 1fr)); width: 100%; flex: 1 1 100%; }
+  .rec-pick-add { max-width: none; }
+  .rec-extra { flex: 1 1 100%; }
   .rec-nrs button { height: 38px; }
+  .rec-opts { flex: 1 1 100%; }
+  .rec-opts button { flex: 1 1 100%; min-height: 40px; }
+  .rec-details { padding: 0 10px; }
   .rec-row .m, .rec-row .l { width: auto; flex: 1 1 130px; }
   .rec-steps { flex-wrap: nowrap; overflow-x: auto; }
   .rec-foot { padding: 8px 10px; }
   /* จอแคบ ป้ายในปฏิทินถูกย่อเป็นจุดสี — ป้ายสถานะเวชระเบียนต้องอ่านเป็นข้อความได้ */
   #patientRecords .badge, .rec-head .badge { font-size: 12px; width: auto; height: auto; padding: 2px 8px; border-radius: 999px; display: inline-block; }
 }
+
+.rec-consent { background: var(--amber-tint) !important; border: 1px solid var(--amber); border-radius: 10px; padding: 8px 12px; margin-bottom: 6px; }
+.rec-consent .rec-mini { margin-inline-start: auto; text-decoration: none; }
+#pwBanner { margin-bottom: 12px; }

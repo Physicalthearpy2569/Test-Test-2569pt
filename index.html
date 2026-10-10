@@ -6,7 +6,7 @@
 <title>ทดสอบระบบนัดหมายผู้ป่วย รพ.สต.</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@400;500;600;700&family=Noto+Serif+Thai:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=20261010e" />
+<link rel="stylesheet" href="style.css?v=20261010f" />
 </head>
 <body>
 
@@ -35,8 +35,9 @@
     <aside class="sidebar">
       <div class="brand">รพ.สต. <span>นัดหมาย</span></div>
       <nav>
-        <button class="navBtn active" data-view="calendar">ปฏิทินนัดหมาย</button>
-        <button class="navBtn" data-view="patients">ค้นหาคนไข้</button>
+        <button class="navBtn active" data-view="calendar">ปฏิทิน<span class="nav-long">นัดหมาย</span></button>
+        <button class="navBtn" data-view="patients">ค้นหา<span class="nav-long">คนไข้</span></button>
+        <button class="navBtn physio-only" data-view="records">เวชระเบียน</button>
         <button class="navBtn physio-only" data-view="dashboard">สถิติ</button>
         <button class="navBtn physio-only" data-view="settings">ตั้งค่า</button>
       </nav>
@@ -50,6 +51,7 @@
 
     <main class="content">
       <div class="version-banner hidden"></div>
+      <div class="version-banner hidden" id="pwBanner">บัญชีนี้ยังใช้รหัสผ่านเริ่มต้นหรือรหัสผ่านสั้นกว่า 8 ตัวอักษร — ก่อนใช้กับข้อมูลคนไข้จริง ให้เปลี่ยนรหัสผ่านในชีต Users (คอลัมน์ password) แล้วเข้าสู่ระบบใหม่</div>
       <!-- ปฏิทิน -->
       <section id="calendarView" class="view">
         <header class="view-head">
@@ -100,6 +102,19 @@
           <p id="patientSearchHint" class="panel-hint" style="margin:8px 0 0;"></p>
         </div>
         <div id="patientProfile"></div>
+      </section>
+
+      <!-- เมนูเวชระเบียน (เฉพาะนักกายภาพ): ค้นหาคนไข้เพื่อเปิดเวชระเบียน + รายการที่บันทึกล่าสุด -->
+      <section id="recordsView" class="view hidden">
+        <header class="view-head">
+          <h2>เวชระเบียน</h2>
+        </header>
+        <div class="patient-search">
+          <input type="search" id="recordSearchInput" placeholder="พิมพ์ชื่อ นามสกุล หรือ PTN เพื่อเปิดเวชระเบียนของคนไข้" autocomplete="off" />
+          <div id="recordSearchResults" class="patient-suggest hidden"></div>
+          <p id="recordSearchHint" class="panel-hint" style="margin:8px 0 0;"></p>
+        </div>
+        <div id="recordsRecent"></div>
       </section>
 
       <!-- เวชระเบียน: แบบประเมินครั้งแรก (เฉพาะนักกายภาพ — เนื้อหาสร้างโดย record.js) -->
@@ -465,7 +480,7 @@
   <div id="apptDetailModal" class="modal hidden">
     <h3>รายละเอียดนัดหมาย</h3>
     <div id="apptDetailBody" class="detail-body"></div>
-    <button type="button" class="secondary physio-only" id="apptDetailRecordBtn" style="width:100%;margin-bottom:14px;">เวชระเบียนของคนไข้คนนี้</button>
+    <button type="button" class="record-btn physio-only" id="apptDetailRecordBtn">เวชระเบียนของคนไข้คนนี้ ›</button>
 
     <div class="section-label" style="margin-top:0;">แก้ไขข้อมูลนัด</div>
     <label>ประเภทนัด
@@ -513,7 +528,7 @@
     </div>
   </div>
 
-  <script src="app.js?v=20261010e"></script>
-  <script src="record.js?v=20261010e"></script>
+  <script src="app.js?v=20261010f"></script>
+  <script src="record.js?v=20261010f"></script>
 </body>
 </html>

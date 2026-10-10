@@ -126,12 +126,12 @@ function jsonp_(action, payload) {
 // ปลุกสคริปต์ทันทีที่หน้าเว็บโหลด (ก่อนผู้ใช้กดอะไรเลย) เผื่อเครื่องเย็นอยู่ (ไม่มีคนใช้มาสักพัก)
 // กว่าผู้ใช้จะพิมพ์ชื่อ/รหัสผ่านแล้วกดเข้าสู่ระบบเสร็จ สคริปต์มักจะอุ่นพอแล้ว ไม่ต้องรอผลอะไรจากตรงนี้
 // คำตอบของ ping บอกรุ่นของหลังบ้านด้วย ใช้เตือนเมื่อวางโค้ดใหม่ใน Apps Script แล้วแต่ยังไม่ได้อัปเดตเว็บแอปเป็นเวอร์ชันใหม่
-const EXPECTED_BACKEND = '2026-10-10e';
+const EXPECTED_BACKEND = '2026-10-10f';
 jsonp_('ping', {}).then(checkBackendVersion_).catch(backendUnreachable_);
 
 /** ping ไม่ได้คำตอบเลย: ส่วนใหญ่คืออัปเดตเว็บแอปก่อนอนุมัติสิทธิ์ใหม่ของสคริปต์ หรือเน็ตมีปัญหา */
 function backendUnreachable_() {
-  document.querySelectorAll('.version-banner').forEach(el => {
+  document.querySelectorAll('.version-banner:not(#pwBanner)').forEach(el => {
     el.classList.remove('hidden');
     el.textContent = 'เชื่อมต่อหลังบ้าน (Apps Script) ไม่ได้ — ตรวจอินเทอร์เน็ตแล้วรีเฟรชหน้านี้ ถ้าเพิ่งวางโค้ดใหม่ ให้เปิด Apps Script ' +
       'เลือกฟังก์ชัน setupSatisfactionForm แล้วกด เรียกใช้ เพื่ออนุมัติสิทธิ์ที่เพิ่มขึ้น จากนั้นรีเฟรชหน้านี้อีกครั้ง';
@@ -141,7 +141,7 @@ function backendUnreachable_() {
 function checkBackendVersion_(res) {
   const v = (res && res.data && res.data.version) || '';
   const ok = v === EXPECTED_BACKEND;
-  document.querySelectorAll('.version-banner').forEach(el => {
+  document.querySelectorAll('.version-banner:not(#pwBanner)').forEach(el => {
     el.classList.toggle('hidden', ok);
     el.textContent = ok ? '' :
       'หลังบ้าน (Apps Script) ยังไม่ใช่รุ่นเดียวกับหน้าเว็บ ฟีเจอร์ใหม่บางอย่างจะไม่ทำงาน — ' +
@@ -240,6 +240,7 @@ document.getElementById('loginForm')?.addEventListener('submit', async (e) => {
   localStorage.setItem('token', res.token);
   localStorage.setItem('role', res.role);
   localStorage.setItem('displayName', res.displayName);
+  localStorage.setItem('weakPassword', res.weakPassword ? '1' : '');
   enterApp();
 });
 
@@ -271,6 +272,7 @@ function enterApp() {
   document.getElementById('loginView').classList.add('hidden');
   document.getElementById('appView').classList.remove('hidden');
   document.getElementById('whoName').textContent = state.displayName;
+  document.getElementById('pwBanner')?.classList.toggle('hidden', localStorage.getItem('weakPassword') !== '1');
   document.getElementById('whoRole').textContent = state.role === 'physio' ? 'นักกายภาพบำบัด' : 'เจ้าหน้าที่นัดหมาย';
   document.querySelectorAll('.physio-only').forEach(el => {
     el.style.display = state.role === 'physio' ? '' : 'none';
@@ -288,9 +290,10 @@ function enterApp() {
 function showView_(view) {
   // ออกจากแบบฟอร์มเวชระเบียนที่ยังไม่ได้บันทึก: ถามก่อน (record.js)
   if (typeof recordLeaveGuard_ === 'function' && !recordLeaveGuard_(view)) return;
-  const navView = view === 'record' ? 'patients' : view; // แบบฟอร์มเวชระเบียนเปิดจากหน้าคนไข้ เมนูจึงไฮไลต์ที่ค้นหาคนไข้
+  const navView = view === 'record' ? 'records' : view; // แบบฟอร์มเวชระเบียนอยู่ใต้เมนูเวชระเบียน
   document.querySelectorAll('.navBtn').forEach(b => b.classList.toggle('active', b.dataset.view === navView));
   document.getElementById('recordView')?.classList.toggle('hidden', view !== 'record');
+  document.getElementById('recordsView')?.classList.toggle('hidden', view !== 'records');
   if (view !== 'calendar') closeDayPanel(); // แผงรายละเอียดวันเป็นของหน้าปฏิทิน ไปหน้าอื่นต้องปิด ไม่งั้นบังเนื้อหา
   document.getElementById('calendarView').classList.toggle('hidden', view !== 'calendar');
   document.getElementById('settingsView').classList.toggle('hidden', view !== 'settings');
@@ -301,6 +304,11 @@ function showView_(view) {
   if (view === 'patients') {
     if (!state.patientsLoaded) refreshPatients();
     document.getElementById('patientSearchInput')?.focus();
+  }
+  if (view === 'records') {
+    if (!state.patientsLoaded) refreshPatients();
+    if (typeof loadRecentRecords_ === 'function') loadRecentRecords_();
+    document.getElementById('recordSearchInput')?.focus();
   }
 }
 document.querySelectorAll('.navBtn').forEach(btn => {
@@ -2356,6 +2364,13 @@ async function quickPick_(p) {
   more.id = 'quickSearchMoreBtn';
   more.addEventListener('click', () => { closeQuickSearch_(true); showView_('patients'); loadPatientProfile_(p); });
   card.appendChild(more);
+  if (state.role === 'physio' && typeof recOpenPatient_ === 'function') {
+    const rec = el('button', 'record-btn quick-card-record', 'เวชระเบียน ›');
+    rec.type = 'button';
+    rec.id = 'quickSearchRecordBtn';
+    rec.addEventListener('click', () => { closeQuickSearch_(true); recOpenPatient_(p); });
+    card.appendChild(rec);
+  }
 }
 
 /* ---------------- ค้นหาคนไข้: พิมพ์ชื่อ/PTN แล้วดูข้อมูลและนัดทั้งหมดของคนนั้น ---------------- */
@@ -2605,7 +2620,7 @@ if (state.token) enterApp();
 // record.js (เวชระเบียน) ต้องอัปโหลดคู่กับไฟล์นี้ ถ้าไม่มีให้เตือนชัด ๆ แทนที่จะปล่อยให้ปุ่มกดแล้วเงียบ
 window.addEventListener('load', () => {
   if (typeof openRecordForm_ === 'function') return;
-  document.querySelectorAll('.version-banner').forEach(el => {
+  document.querySelectorAll('.version-banner:not(#pwBanner)').forEach(el => {
     el.classList.remove('hidden');
     el.textContent = 'ยังไม่พบไฟล์ record.js บนเว็บ — อัปโหลด record.js ขึ้น GitHub คู่กับ index.html, app.js, style.css แล้วรีเฟรชหน้านี้ (ส่วนเวชระเบียนจะยังใช้ไม่ได้)';
   });
