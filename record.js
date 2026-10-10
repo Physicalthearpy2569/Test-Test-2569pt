@@ -140,8 +140,8 @@ function recScoreItems_() {
         <summary><b>Barthel ADL</b><span class="rec-details-sum" id="recBarthelSum"></span></summary>
         <div class="rec-grid">
         ${REC_BARTHEL.map((it, i) => `<div class="rec-row rec-barthel"><span class="lb">${i + 1}. ${esc_(it[0])}<small>${esc_(it[1])}</small></span>${rOpts('pt_barthel_' + (i + 1), it[0], it[2].map((t, v) => [v, t]))}</div>`).join('')}
+        ${rWide(rRow('คะแนนรวม', `<input type="number" data-k="pt_barthel" class="s" min="0" max="20" step="1" inputmode="numeric" aria-label="คะแนนรวม Barthel ADL">`, rTx('/ 20 · รวมให้เองเมื่อติ๊กครบ 10 ข้อ ถ้ามีแต่คะแนนรวม (เช่น จากแอปเยี่ยมบ้าน) กรอกตรงนี้ได้')))}
         </div>
-        <input type="hidden" data-k="pt_barthel">
       </details>` }
   ];
 }
@@ -157,9 +157,19 @@ function recSetScore_(key, value) {
   if (value !== null) { el.value = String(value); el.dataset.auto = '1'; }
   else if (el.dataset.auto === '1' || el.type === 'hidden') { el.value = ''; delete el.dataset.auto; }
 }
-function recBarthelTotal_() {
+/** คะแนนรวมจากข้อที่ติ๊ก (ต้องติ๊กครบ 10 ข้อ) */
+function recBarthelItemsTotal_() {
   const picks = REC_BARTHEL.map((it, i) => recPicked_('pt_barthel_' + (i + 1)));
   return picks.every(v => v !== null) ? picks.reduce((s, v) => s + v, 0) : null;
+}
+/** คะแนนรวม Barthel ที่ใช้ตัดสิน: จากข้อที่ติ๊กครบ ถ้าไม่ครบใช้คะแนนรวมที่กรอกเอง (0-20) */
+function recBarthelTotal_() {
+  const items = recBarthelItemsTotal_();
+  if (items !== null) return items;
+  const el = recBody_().querySelector('[data-k="pt_barthel"]');
+  if (!el || el.dataset.auto === '1' || recHiddenField_(el)) return null;
+  const raw = (el.value || '').trim(), n = Number(raw);
+  return raw !== '' && isFinite(n) && n >= 0 && n <= 20 ? n : null;
 }
 /** คำนวณคะแนนของ EQ-5D-5L และ Barthel ADL จากข้อที่ติ๊ก แล้วแสดงผลที่หัวบล็อก */
 function recScores_() {
@@ -178,12 +188,13 @@ function recScores_() {
   recSetScore_('pt_eq5d', util);
 
   const bDone = REC_BARTHEL.filter((it, i) => recPicked_('pt_barthel_' + (i + 1)) !== null).length;
+  recSetScore_('pt_barthel', recBarthelItemsTotal_());
   const total = recBarthelTotal_();
+  const typed = total !== null && recBarthelItemsTotal_() === null;
   const bSum = document.getElementById('recBarthelSum');
-  bSum.textContent = total !== null ? `${total} / 20 คะแนน · ${recBarthelGroup_(total)}` : (bDone ? `ตอบแล้ว ${bDone} / ${REC_BARTHEL.length} ข้อ` : 'ยังไม่ได้ประเมิน');
+  bSum.textContent = total !== null ? `${total} / 20 คะแนน · ${recBarthelGroup_(total)}${typed ? ' (กรอกคะแนนรวม)' : ''}` : (bDone ? `ตอบแล้ว ${bDone} / ${REC_BARTHEL.length} ข้อ` : 'ยังไม่ได้ประเมิน');
   bSum.classList.toggle('done', total !== null);
   bSum.classList.toggle('bad', total !== null && total < 12);
-  recSetScore_('pt_barthel', total);
 }
 
 /** รายการทดสอบจากชีต AssessTests ในรูปของรายการให้เลือก (EQ5D และ Barthel ใช้บล็อกติ๊กทีละข้อแทนช่องคะแนนเดี่ยว) */
@@ -210,6 +221,11 @@ function recTestItems_() {
 function recPart2_() {
   const st = (id, label, ...c) => ({ id: id, label: label, lead: 'p2_st_' + id, wide: true, html: rName(label) + c.join('') });
   return rCard(2, 'Physical Examination', [
+    rWide(`<div class="rec-row rec-field hidden" id="recFieldRow"><span class="lb">ผลจาก AppSheet</span>
+      <select id="recFieldSel" class="l" aria-label="เลือกผลประเมินจาก AppSheet"></select>
+      <button type="button" class="secondary rec-mini" id="recFieldApply">ดึงมาใส่แบบฟอร์ม</button>
+      <span class="tx" id="recFieldNote"></span>
+      <input type="hidden" data-k="p2_as_id"><input type="hidden" data-k="p2_as_by"><input type="hidden" data-k="p2_as_date"></div>`),
     rRow('เวลาที่ตรวจ', `<input type="time" data-k="p2_time" class="s2" aria-label="เวลาที่ตรวจ">`),
     rSub('Behavior of symptoms'),
     rRow('อาการ', rDD('p2_sym', 'symptom', 'อาการ'), rTx('of'), rDD('p2_sym_at', 'bodyPart', 'ตำแหน่ง')),
@@ -531,6 +547,7 @@ async function openRecordForm_(opts) {
   }
   REC.setup = su.data;
   REC.patient = rr.data.patient;
+  REC.field = rr.data.field || [];
   const today = rr.data.today || todayYmd_();
   let data = {};
   if (opts.id) {
@@ -599,12 +616,14 @@ function recRender_(data, today) {
   document.getElementById('recConsentPrint').href = 'consent.html#' + ['name=' + encodeURIComponent(`${p.firstName} ${p.lastName}`), 'ptn=' + encodeURIComponent(p.ptn), 'date=' + encodeURIComponent(m.date)].join('&');
   recFill_(data);
   recPickInit_();
+  recFieldInit_(!m.id);
   recApplyShow_();
   recScores_();
   recUpdateAge_();
   // ข้อความ Decrease performance ที่บันทึกไว้: ถ้าตรงกับที่ระบบคำนวณได้ตอนนี้ ถือว่ายังเป็นของระบบ (อัปเดตตามผลทดสอบต่อได้)
   REC.autoDec = '';
-  const saved = (data.p3_decPerf_detail || '').trim();
+  // อ่านจากช่องจริง (ไม่ใช่ข้อมูลที่โหลดมา) เพราะแบบฟอร์มใหม่อาจเพิ่งถูกเติมผลจาก AppSheet
+  const saved = (recBody_().querySelector('[data-k="p3_decPerf_detail"]').value || '').trim();
   const nowText = recEvaluateTests_();
   REC.autoDec = saved === nowText.trim() ? nowText : (saved ? '\u0000' : '');
   recWire_();
@@ -654,7 +673,11 @@ function recWire_() {
     recGrow_(el);
     document.getElementById('recError').textContent = '';
     if (el.id === 'recBirthDay' || el.id === 'recBirthYear' || el.id === 'recAgeTyped') { recUpdateAge_(); recSyncDecPerf_(false); }
-    else if (el.dataset && /^pt_/.test(el.dataset.k || '') && !/_label$/.test(el.dataset.k)) recSyncDecPerf_(false);
+    else if (el.dataset && /^pt_/.test(el.dataset.k || '') && !/_label$/.test(el.dataset.k)) {
+      delete el.dataset.auto; // พิมพ์เอง = ไม่ใช่ค่าที่ระบบคำนวณแล้ว
+      if (el.dataset.k === 'pt_barthel') recScores_();
+      recSyncDecPerf_(false);
+    }
   });
   body.querySelectorAll('[data-nrs]').forEach(g => g.addEventListener('click', e => {
     const btn = e.target.closest('button[data-v]');
@@ -671,6 +694,13 @@ function recWire_() {
     if (x) recPickRemove_(x.closest('.rec-pick-item'));
   });
   recSpy_();
+  document.getElementById('recFieldApply').addEventListener('click', () => {
+    const a = (REC.field || []).find(x => x.id === document.getElementById('recFieldSel').value);
+    if (!a) return;
+    recApplyField_(a);
+    document.getElementById('recFieldNote').textContent = 'ดึงมาใส่แล้ว ตรวจค่าก่อนบันทึก';
+    recSetDirty_(true);
+  });
   document.getElementById('recDecRefill').addEventListener('click', () => { recSyncDecPerf_(true); recSetDirty_(true); });
   document.getElementById('recSaveDraftBtn')?.addEventListener('click', () => recSave_('draft'));
   document.getElementById('recSaveFinalBtn').addEventListener('click', () => recSave_('final'));
@@ -703,6 +733,61 @@ function recSpySoon_() {
 }
 window.addEventListener('scroll', recSpySoon_, { passive: true });
 document.querySelector('.content')?.addEventListener('scroll', recSpySoon_, { passive: true });
+
+/* ---------------- ผลประเมินจาก AppSheet (ผู้ช่วยประเมินนอกระบบนี้) ---------------- */
+
+function recFieldLabel_(a) {
+  return `${a.source ? a.source + ' · ' : ''}${fmtThaiDate_(a.date)}${a.assessor ? ' · ' + a.assessor : ''} · ${a.items.length} รายการ`;
+}
+/**
+ * แถว "ผลจาก AppSheet" ในชุดที่ 2: โชว์เมื่อคนไข้มีผลประเมินจากแอป
+ * แบบฟอร์มใหม่ (ยังไม่เคยบันทึก): ถ้ามีผลประเมินของวันเดียวกับวันที่ประเมิน เติมให้เลย — นักกายภาพตรวจแล้วกดบันทึกเอง
+ * เวชระเบียนที่บันทึกแล้วไม่ถูกเติม/แก้เอง ต้องกด "ดึงมาใส่แบบฟอร์ม"
+ */
+function recFieldInit_(isNew) {
+  const list = REC.field || [];
+  const row = document.getElementById('recFieldRow');
+  if (!row) return;
+  row.classList.toggle('hidden', !list.length);
+  if (!list.length) return;
+  const sel = document.getElementById('recFieldSel');
+  sel.innerHTML = list.map(a => `<option value="${recAttr_(a.id)}">${esc_(recFieldLabel_(a))}</option>`).join('');
+  const note = document.getElementById('recFieldNote');
+  const usedId = recBody_().querySelector('[data-k="p2_as_id"]').value;
+  const used = list.find(a => a.id === usedId);
+  if (used) { sel.value = used.id; note.textContent = 'เวชระเบียนนี้ดึงผลชุดนี้มาแล้ว'; return; }
+  if (!isNew) return;
+  const same = list.find(a => a.date === REC.meta.date);
+  if (!same) return;
+  sel.value = same.id;
+  recApplyField_(same);
+  note.textContent = 'เติมผลประเมินของวันนี้ให้แล้ว ตรวจค่าก่อนบันทึก';
+}
+/** เติมผลประเมินจากแอปลงแบบฟอร์ม (เฉพาะช่องที่ผลชุดนั้นมีค่า) และเปิดรายการที่มีค่าให้เห็น */
+function recApplyField_(a) {
+  const body = recBody_();
+  Object.keys(a.data).forEach(k => {
+    const v = String(a.data[k]);
+    const group = body.querySelector(`[data-nrs="${k}"]`);
+    if (group) { group.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.v === v)); return; }
+    const el = body.querySelector(`[data-k="${k}"]`);
+    if (el && el.type !== 'checkbox') recSetField_(el, v);
+  });
+  body.querySelector('[data-k="p2_as_id"]').value = a.id;
+  body.querySelector('[data-k="p2_as_by"]').value = a.assessor || '';
+  body.querySelector('[data-k="p2_as_date"]').value = a.date;
+  body.querySelectorAll('.rec-pick').forEach(pick => {
+    pick.querySelectorAll('.rec-pick-item.hidden').forEach(item => {
+      if (!recItemHasData_(item)) return;
+      item.classList.remove('hidden');
+      if (item.dataset.leadk) item.querySelector(`[data-k="${item.dataset.leadk}"]`).checked = true;
+    });
+    recPickRefresh_(pick);
+  });
+  recApplyShow_();
+  recScores_();
+  recSyncDecPerf_(false);
+}
 
 /* ---------------- ซ่อนไว้จนกว่าจะใช้ ---------------- */
 
@@ -867,7 +952,7 @@ window.addEventListener('beforeunload', e => {
 });
 /** ออกจากระบบ: ไม่ทิ้งข้อมูลเวชระเบียนค้างบนจอ */
 function recordReset_() {
-  REC.dirty = false; REC.patient = null; REC.meta = null; REC.setup = null; REC.autoDec = '';
+  REC.dirty = false; REC.patient = null; REC.meta = null; REC.setup = null; REC.autoDec = ''; REC.field = [];
   const body = recBody_();
   if (body) body.innerHTML = '';
   _recRecentReq_++;
@@ -889,6 +974,7 @@ async function loadPatientRecords_(ptn) {
   if (req !== _recListReq_ || !document.body.contains(box)) return;
   if (!res.ok) { box.innerHTML = `<h3>เวชระเบียน</h3><p class="error-text">โหลดเวชระเบียนไม่สำเร็จ: ${esc_(res.error)}</p>`; return; }
   const recs = res.data.records || [];
+  const field = res.data.field || [];
   const rows = recs.map(r => `
     <tr data-id="${recAttr_(r.id)}">
       <td>Session ${esc_(r.session)}</td><td>${esc_(fmtThaiDate_(r.date))}</td><td>${recStatusLabel_(r.status)}</td>
@@ -900,7 +986,14 @@ async function loadPatientRecords_(ptn) {
     <p class="dash-sub">คนไข้ 1 คนใช้ PTN เดิม มาด้วยอาการใหม่ให้เปิด session ใหม่</p>
     ${rows ? `<div class="table-scroll"><table class="mini-table rec-table">
       <thead><tr><th>Session</th><th>วันที่ประเมิน</th><th>สถานะ</th><th>Chief complaint</th><th>Diagnosis</th><th></th></tr></thead>
-      <tbody>${rows}</tbody></table></div>` : '<div class="dash-empty">ยังไม่มีเวชระเบียน</div>'}`;
+      <tbody>${rows}</tbody></table></div>` : '<div class="dash-empty">ยังไม่มีเวชระเบียน</div>'}
+    ${field.length ? `
+      <h4 class="rec-field-title">ผลประเมินจาก AppSheet <span>${field.length} ครั้ง · เปิดเวชระเบียนแล้วกด "ดึงมาใส่แบบฟอร์ม" เพื่อใช้ผลชุดที่ต้องการ</span></h4>
+      <div class="table-scroll"><table class="mini-table rec-table" id="recFieldTable">
+        <thead><tr><th>วันที่ประเมิน</th><th>ที่มา</th><th>ผู้ประเมิน</th><th>ผล</th><th>หมายเหตุ / คำแนะนำ</th></tr></thead>
+        <tbody>${field.map(a => `<tr><td>${esc_(fmtThaiDate_(a.date))}</td><td>${esc_(a.source || '-')}</td><td>${esc_(a.assessor || '-')}</td>
+          <td>${a.items.map(i => `<span class="rec-chip">${esc_(i.label)} <b>${esc_(i.value)}</b></span>`).join('')}</td><td>${esc_(a.note || '')}</td></tr>`).join('')}</tbody></table></div>` : ''}
+    ${res.data.fieldError ? `<p class="error-text" id="recFieldError" style="margin-top:10px;">${esc_(res.data.fieldError)}</p>` : ''}`;
   document.getElementById('recNewBtn').addEventListener('click', () => {
     const drafts = recs.filter(r => r.status !== 'final').length;
     if (drafts && !window.confirm('คนไข้คนนี้มีฉบับร่างค้างอยู่ จะเปิด session ใหม่อีกชุดหรือไม่ (ถ้าจะกรอกต่อ ให้กด เปิด ที่ฉบับร่างเดิม)')) return;

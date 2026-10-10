@@ -45,7 +45,7 @@ const PTN_FISCAL_YEAR = false; // false = นับปีตามปฏิท�
 
 // รุ่นของโค้ดหลังบ้าน — หน้าเว็บ (app.js) ใช้ค่านี้ตรวจว่าเว็บแอปถูกอัปเดตเป็นเวอร์ชันใหม่แล้วหรือยัง
 // (วางโค้ดใหม่ใน Apps Script แล้วแต่ยังไม่ได้กด "จัดการการทำให้ใช้งานได้ > เวอร์ชันใหม่" เว็บจะยังเรียกโค้ดรุ่นเก่าอยู่)
-const BACKEND_VERSION = '2026-10-10f';
+const BACKEND_VERSION = '2026-10-12a';
 
 const BUSY_TYPES = ['ประชุม', 'ทำเอกสาร', 'อบรม', 'ลา'];
 const APPT_TYPES = ['OPD', 'ลงชุมชน'];
@@ -1457,9 +1457,10 @@ function countApptsWithPtn_(ptn, excludeApptId) {
  */
 function linkPatient_(input, opts) {
   opts = opts || {};
-  const lock = LockService.getScriptLock();
+  // opts.locked = true เมื่อผู้เรียกถือล็อกของสคริปต์อยู่แล้ว (syncAppSheet) — ไม่ล็อก/ปลดล็อกซ้ำ
+  const lock = opts.locked === true ? null : LockService.getScriptLock();
   try {
-    lock.waitLock(15000); // กันสองเครื่องลงคนไข้ใหม่พร้อมกันแล้วได้ PTN ซ้ำ
+    if (lock) lock.waitLock(15000); // กันสองเครื่องลงคนไข้ใหม่พร้อมกันแล้วได้ PTN ซ้ำ
   } catch (e) {
     return { ok: false, error: 'ระบบกำลังบันทึกรายการอื่นอยู่ กรุณาลองใหม่อีกครั้ง' };
   }
@@ -1529,7 +1530,7 @@ function linkPatient_(input, opts) {
     if (changed) writePatientRow_(sheet, target._row, rec);
     return { ok: true, ptn: rec.ptn, isNew: false, patient: publicPatient_(rec) };
   } finally {
-    lock.releaseLock();
+    if (lock) lock.releaseLock();
   }
 }
 
@@ -2337,7 +2338,9 @@ function getPatientRecords_(payload, auth) {
     return m;
   }).sort((a, b) => (b.session - a.session) || (a.date < b.date ? 1 : -1));
   if (records.length) recordLog_(auth, 'list', '', ptn);
-  return { ok: true, data: { ptn: ptn, today: todayStr_(), patient: recordPatient_(reg), records: records } };
+  const fa = fieldAssessments_(ptn);
+  if (!records.length && fa.list.length) recordLog_(auth, 'list', '', ptn);
+  return { ok: true, data: { ptn: ptn, today: todayStr_(), patient: recordPatient_(reg), records: records, field: fa.list, fieldError: fa.error } };
 }
 
 /** เวชระเบียนที่บันทึก/แก้ไขล่าสุดของทุกคน (ใหม่สุดก่อน สูงสุด 40 ชุด) พร้อมชื่อคนไข้ — ใช้ในเมนูเวชระเบียน */
@@ -2368,7 +2371,7 @@ function getRecord_(payload, auth) {
   });
   const reg = patientsData_().find(p => normText_(p.ptn) === meta.ptn);
   recordLog_(auth, 'view', meta.id, meta.ptn);
-  return { ok: true, data: { record: Object.assign(meta, { data: data }), patient: reg ? recordPatient_(reg) : null, today: todayStr_() } };
+  return { ok: true, data: { record: Object.assign(meta, { data: data }), patient: reg ? recordPatient_(reg) : null, today: todayStr_(), field: fieldAssessments_(meta.ptn).list } };
 }
 
 /**
@@ -2482,6 +2485,498 @@ function deleteRecord_(payload, auth) {
   return { ok: true };
 }
 
+/* ---------------------------- AppSheet: ให้ผู้ช่วยประเมินคนไข้นอกระบบนี้ แล้วผลโยงเข้าเวชระเบียน ---------------------------- */
+// แอป AppSheet (สร้างในบัญชี Google ของเจ้าของชีต) อ่าน/เขียนแท็บ 2 แท็บในสเปรดชีตนี้:
+//   AS_Patients     : รายชื่อคนไข้สำหรับให้เลือกในแอป มีแค่ PTN กับชื่อ (ไม่มีเลขบัตร เบอร์โทร ที่อยู่) — เป็นสูตรดึงจากแท็บ Patients อัปเดตเอง
+//   AS_NewPatients  : คำขอเพิ่มคนไข้ใหม่จากแอป — syncAppSheet() ตรวจทุก 5 นาที: ถ้าเป็นคนไข้เดิมคืน PTN เดิม ถ้าไม่ใช่ออก PTN ใหม่ แล้วเขียน PTN กลับลงแถวนั้น
+//   AS_Assessments  : ผลประเมิน 1 แถวต่อการประเมิน 1 ครั้ง หัวคอลัมน์เป็นชื่อที่คนอ่านเข้าใจ (แอปใช้เป็นชื่อช่อง)
+//   AS_Columns      : บอกว่าหัวคอลัมน์ใดของ AS_Assessments คือช่องใดในเวชระเบียน (ระบบใช้ ไม่ต้องเพิ่มในแอป)
+// หน้าเวชระเบียนอ่าน AS_Assessments ตาม PTN: แสดงในหน้าคนไข้ และดึงมาเติมแบบฟอร์มให้นักกายภาพตรวจก่อนบันทึก
+// (ผลจากแอปไม่ถูกเขียนลงเวชระเบียนเองโดยไม่มีคนตรวจ) ความพึงพอใจยังใช้ Google Form แบบไม่ระบุตัวตนตามเดิม ไม่อยู่ในแอปนี้
+const SHEET_AS_PATIENTS = 'AS_Patients';
+const SHEET_AS_ASSESS = 'AS_Assessments';
+const SHEET_AS_COLUMNS = 'AS_Columns';
+const SHEET_AS_CONFIG = 'AS_Config';
+const SHEET_AS_NEW = 'AS_NewPatients';
+// หัวคอลัมน์ของแท็บ AS_NewPatients (AppSheet ใช้เป็นชื่อช่อง) — 2 คอลัมน์ท้ายระบบเป็นผู้เขียน ผู้ใช้แอปไม่ต้องกรอก
+const AS_NEW = { id: 'ID', first: 'ชื่อ', last: 'นามสกุล', nid: 'เลขบัตรประชาชน', phone: 'เบอร์โทร', moo: 'หมู่', by: 'ผู้บันทึก', time: 'เวลาบันทึก', ptn: 'PTN', status: 'สถานะ' };
+const AS_NEW_HEADERS = [AS_NEW.id, AS_NEW.first, AS_NEW.last, AS_NEW.nid, AS_NEW.phone, AS_NEW.moo, AS_NEW.by, AS_NEW.time, AS_NEW.ptn, AS_NEW.status];
+const AS_NEW_MAX_PER_RUN = 10;
+// แอปเยี่ยมบ้านเดิม (อีกสเปรดชีตหนึ่ง): ลิงก์ของชีตนั้นวางไว้ในแท็บ AS_Config ไม่เขียนไว้ในโค้ด (โค้ดนี้อยู่ใน GitHub ที่เปิดสาธารณะ)
+// คอลัมน์ของชีตเยี่ยมบ้านที่โยงเข้าช่องของเวชระเบียน — ADL = คะแนนรวม Barthel 0-20, Chair stand test = 30 second chair stand
+const HOME_VISIT_FIELDS = [
+  { header: 'ผล MMSE', key: 'pt_mmse', label: 'MMSE', max: 30 },
+  { header: 'TUG', key: 'pt_tug', label: 'TUG (วินาที)', max: 99999 },
+  { header: 'TUG-DUal task', key: 'pt_tugDual', label: 'TUG + dual task (วินาที)', max: 99999 },
+  { header: 'Chair stand test', key: 'pt_chairStand30', label: '30 second chair stand (ครั้ง)', max: 99999 },
+  { header: '2MST', key: 'pt_step2min', label: '2 Minute Step test (ครั้ง)', max: 99999 },
+  { header: 'ADL', key: 'pt_barthel', label: 'Barthel ADL', max: 20 }
+];
+// คอลัมน์ที่แสดงให้ดูเฉย ๆ (ไม่มีช่องรองรับในแบบฟอร์มเวชระเบียน)
+const HOME_VISIT_SHOW = [{ header: 'Depression', label: 'Depression' }, { header: 'ครั้งที่', label: 'เยี่ยมครั้งที่' }];
+const AS_SAMPLE_ID = 'ตัวอย่าง';
+// ต้องตรงกับ REC_EQ5D / REC_BARTHEL ใน record.js
+const AS_EQ5D = [
+  ['mo', 'การเคลื่อนไหว', [0, 0.056, 0.114, 0.231, 0.307]],
+  ['sc', 'การดูแลตนเอง', [0, 0.033, 0.108, 0.225, 0.254]],
+  ['ua', 'กิจกรรมที่ทำเป็นประจำ', [0, 0.043, 0.075, 0.165, 0.207]],
+  ['pd', 'อาการเจ็บปวด/ไม่สบายตัว', [0, 0.040, 0.068, 0.233, 0.266]],
+  ['ad', 'ความวิตกกังวล/ซึมเศร้า', [0, 0.032, 0.097, 0.202, 0.249]]
+];
+const AS_EQ5D_LEVELS = ['ไม่มีปัญหา', 'เล็กน้อย', 'ปานกลาง', 'มาก', 'มากที่สุด'];
+const AS_BARTHEL = [
+  ['Feeding', ['ต้องมีคนป้อน', 'ตักเองได้ ต้องช่วยเตรียม', 'ช่วยตัวเองได้ปกติ']],
+  ['Grooming', ['ต้องการความช่วยเหลือ', 'ทำเองได้']],
+  ['Transfer', ['นั่งไม่ได้/ใช้ 2 คนยก', 'ต้องช่วยอย่างมาก', 'ต้องช่วยบ้าง', 'ทำได้เอง']],
+  ['Toilet use', ['ช่วยตัวเองไม่ได้', 'ทำเองได้บ้าง', 'ช่วยตัวเองได้ดี']],
+  ['Mobility', ['เคลื่อนที่ไม่ได้', 'ใช้รถเข็นเองได้', 'เดินโดยมีคนช่วย', 'เดินได้เอง']],
+  ['Dressing', ['ต้องมีคนใส่ให้', 'ช่วยตัวเองได้ราวครึ่ง', 'ช่วยตัวเองได้ดี']],
+  ['Stairs', ['ทำไม่ได้', 'ต้องการคนช่วย', 'ขึ้นลงได้เอง']],
+  ['Bathing', ['ต้องมีคนช่วย', 'อาบเองได้']],
+  ['Bowels', ['กลั้นไม่ได้', 'กลั้นไม่ได้บางครั้ง', 'กลั้นได้ปกติ']],
+  ['Bladder', ['กลั้นไม่ได้', 'กลั้นไม่ได้บางครั้ง', 'กลั้นได้ปกติ']]
+];
+
+/**
+ * คอลัมน์ของแท็บ AS_Assessments: { header, key, kind, list?, min?, max?, sample }
+ * key = ช่องในเวชระเบียน (p2_.. / pt_..) หรือ id / date / time / ptn / assessor / note
+ */
+function appSheetColumns_() {
+  const cols = [
+    { header: 'ID', key: 'id', kind: 'id', sample: AS_SAMPLE_ID },
+    { header: 'วันที่ประเมิน', key: 'date', kind: 'date' },
+    { header: 'เวลาบันทึก', key: 'time', kind: 'datetime' },
+    { header: 'คนไข้ (PTN)', key: 'ptn', kind: 'ptn', sample: '' },
+    { header: 'ผู้ประเมิน', key: 'assessor', kind: 'text', sample: 'ตัวอย่าง@gmail.com' },
+    { header: 'NRS ขณะพัก (0-10)', key: 'p2_nrs_rest', kind: 'int', min: 0, max: 10, sample: 2 },
+    { header: 'NRS ขณะใช้งาน (0-10)', key: 'p2_nrs_func', kind: 'int', min: 0, max: 10, sample: 5 }
+  ];
+  assessTestsAll_().filter(t => t.active && t.key !== 'eq5d' && t.key !== 'barthel').forEach(t => {
+    if (t.askName) cols.push({ header: t.name + ': ชื่อแบบสอบถาม', key: 'pt_' + t.key + '_label', kind: 'text', sample: '' });
+    cols.push({ header: t.name + (t.unit ? ' (' + t.unit + ')' : ''), key: 'pt_' + t.key, kind: 'num', min: 0, max: 99999, sample: 12.5 });
+  });
+  AS_EQ5D.forEach(d => cols.push({ header: 'EQ-5D: ' + d[1], key: 'pt_eq5d_' + d[0], kind: 'enum',
+    list: AS_EQ5D_LEVELS.map((t, i) => (i + 1) + ' = ' + t), sample: '1 = ' + AS_EQ5D_LEVELS[0] }));
+  cols.push({ header: 'EQ-5D: สุขภาพวันนี้ VAS (0-100)', key: 'pt_eq5d_vas', kind: 'int', min: 0, max: 100, sample: 70 });
+  AS_BARTHEL.forEach((b, i) => cols.push({ header: 'Barthel ' + (i + 1) + '. ' + b[0], key: 'pt_barthel_' + (i + 1), kind: 'enum',
+    list: b[1].map((t, v) => v + ' = ' + t), sample: (b[1].length - 1) + ' = ' + b[1][b[1].length - 1] }));
+  cols.push({ header: 'หมายเหตุ', key: 'note', kind: 'text', sample: 'แถวตัวอย่างสำหรับตั้งค่า AppSheet ลบได้หลังสร้างแอปเสร็จ' });
+  // หัวคอลัมน์ต้องไม่ซ้ำกัน (ชื่อรายการทดสอบในชีตอาจซ้ำ)
+  const seen = {};
+  cols.forEach(c => { let h = c.header, n = 2; while (seen[h]) h = c.header + ' ' + (n++); seen[h] = true; c.header = h; });
+  return cols;
+}
+function asColLetter_(n) {
+  let s = '';
+  while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); }
+  return s;
+}
+
+/**
+ * รัน "ครั้งเดียว" จากตัวแก้ไข Apps Script (เลือก setupAppSheet ข้างปุ่ม "เรียกใช้" แล้วกด Run) ก่อนสร้างแอปใน AppSheet
+ * สิ่งที่ทำ: สร้างแท็บ AS_Patients, AS_NewPatients, AS_Assessments, AS_Columns พร้อมหัวคอลัมน์ ตัวเลือกดรอปดาวน์ และแถวตัวอย่าง 1 แถว
+ * และตั้งให้ syncAppSheet ทำงานเองทุก 5 นาที (ออก PTN ให้คำขอคนไข้ใหม่จากแอป)
+ * (AppSheet ดูชนิดของแต่ละช่องจากแถวตัวอย่างนี้ ระบบเวชระเบียนไม่นับแถวตัวอย่าง ลบได้หลังสร้างแอปเสร็จ)
+ * รันซ้ำได้ปลอดภัย: ไม่แตะข้อมูลที่กรอกแล้ว — ถ้าเพิ่มรายการทดสอบใหม่ในแท็บ AssessTests ให้รันซ้ำ จะเพิ่มคอลัมน์ต่อท้ายให้
+ * แล้วไปกด Regenerate schema ของตาราง AS_Assessments ใน AppSheet
+ */
+function setupAppSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    // ---- AS_Patients: PTN + ชื่อ จากทะเบียน (สูตร อัปเดตเองเมื่อมีคนไข้ใหม่)
+    const pSheet = ensurePatientInfra_();
+    const pHeaders = recHeaders_(pSheet);
+    const col = h => { const i = pHeaders.indexOf(h); if (i === -1) throw new Error('ไม่พบคอลัมน์ ' + h + ' ในแท็บ Patients'); return asColLetter_(i + 1); };
+    const cPtn = col('ptn'), cFirst = col('firstName'), cLast = col('lastName');
+    let asP = ss.getSheetByName(SHEET_AS_PATIENTS);
+    if (!asP) { asP = ss.insertSheet(SHEET_AS_PATIENTS); asP.setFrozenRows(1); }
+    asP.getRange(1, 1, 1, 5).setValues([['ptn', 'name', 'label', 'firstName', 'lastName']]);
+    const src = "'" + SHEET_PATIENTS + "'!";
+    asP.getRange(2, 1).setFormula('=ARRAYFORMULA(IF(' + src + cPtn + '2:' + cPtn + '="","",' + src + cPtn + '2:' + cPtn + '))');
+    asP.getRange(2, 2).setFormula('=ARRAYFORMULA(IF(' + src + cPtn + '2:' + cPtn + '="","",TRIM(' + src + cFirst + '2:' + cFirst + '&" "&' + src + cLast + '2:' + cLast + ')))');
+    asP.getRange(2, 3).setFormula('=ARRAYFORMULA(IF(' + src + cPtn + '2:' + cPtn + '="","",TRIM(' + src + cFirst + '2:' + cFirst + '&" "&' + src + cLast + '2:' + cLast + ')&" ("&' + src + cPtn + '2:' + cPtn + '&")"))');
+    // ชื่อ / นามสกุลแยกช่อง: ให้แอปเยี่ยมบ้านเดิม (ที่เก็บชื่อกับสกุลคนละคอลัมน์) เติมให้เองเมื่อเลือกคนไข้
+    asP.getRange(2, 4).setFormula('=ARRAYFORMULA(IF(' + src + cPtn + '2:' + cPtn + '="","",TRIM(' + src + cFirst + '2:' + cFirst + ')))');
+    asP.getRange(2, 5).setFormula('=ARRAYFORMULA(IF(' + src + cPtn + '2:' + cPtn + '="","",TRIM(' + src + cLast + '2:' + cLast + ')))');
+
+    // ---- AS_Assessments
+    const cols = appSheetColumns_();
+    let asA = ss.getSheetByName(SHEET_AS_ASSESS);
+    const created = !asA;
+    if (created) { asA = ss.insertSheet(SHEET_AS_ASSESS); }
+    const existing = recHeaders_(asA);
+    const add = cols.filter(c => existing.indexOf(c.header) === -1);
+    if (add.length) {
+      recEnsureGrid_(asA, 2, existing.length + add.length);
+      asA.getRange(1, existing.length + 1, 1, add.length).setValues([add.map(c => c.header)]);
+    }
+    asA.setFrozenRows(1);
+    const headers = recHeaders_(asA);
+    const rows = Math.max(asA.getMaxRows() - 1, 1);
+    cols.forEach(c => {
+      const ci = headers.indexOf(c.header) + 1;
+      const range = asA.getRange(2, ci, rows, 1);
+      if (c.kind === 'id' || c.kind === 'ptn' || c.kind === 'text' || c.kind === 'enum') range.setNumberFormat('@');
+      if (c.kind === 'date') range.setNumberFormat('yyyy-mm-dd');
+      if (c.kind === 'datetime') range.setNumberFormat('yyyy-mm-dd hh:mm:ss');
+      let rule = null;
+      if (c.kind === 'enum') rule = SpreadsheetApp.newDataValidation().requireValueInList(c.list, true).setAllowInvalid(true).build();
+      if (c.kind === 'ptn') rule = SpreadsheetApp.newDataValidation().requireValueInRange(asP.getRange('A2:A'), true).setAllowInvalid(true).build();
+      if (c.kind === 'int' || c.kind === 'num') rule = SpreadsheetApp.newDataValidation().requireNumberBetween(c.min, c.max).setAllowInvalid(true).build();
+      if (rule) range.setDataValidation(rule);
+    });
+    if (created) {
+      const now = new Date();
+      const sample = headers.map(h => {
+        const c = cols.find(x => x.header === h);
+        if (!c) return '';
+        if (c.kind === 'date' || c.kind === 'datetime') return now;
+        return c.sample !== undefined ? c.sample : '';
+      });
+      asA.getRange(2, 1, 1, headers.length).setValues([sample]);
+    }
+    invalidateCache_(SHEET_AS_ASSESS);
+
+    // ---- AS_Columns: หัวคอลัมน์ -> ช่องในเวชระเบียน (เขียนใหม่ทั้งแท็บ)
+    let asC = ss.getSheetByName(SHEET_AS_COLUMNS);
+    if (!asC) asC = ss.insertSheet(SHEET_AS_COLUMNS);
+    const last = Math.max(asC.getLastRow(), 1);
+    asC.getRange(1, 1, last, 3).clearContent();
+    recEnsureGrid_(asC, cols.length + 1, 3);
+    asC.getRange(1, 1, cols.length + 1, 3).setNumberFormat('@')
+      .setValues([['header', 'key', 'kind']].concat(cols.map(c => [c.header, c.key, c.kind])));
+    asC.setFrozenRows(1);
+    invalidateCache_(SHEET_AS_COLUMNS);
+
+    // ---- AS_Config: ที่วางลิงก์ชีตของแอปเยี่ยมบ้านเดิม (ค่าที่กรอกไว้แล้วไม่ถูกแตะ)
+    let asG = ss.getSheetByName(SHEET_AS_CONFIG);
+    if (!asG) {
+      asG = ss.insertSheet(SHEET_AS_CONFIG);
+      asG.getRange(1, 1, 2, 3).setNumberFormat('@').setValues([['key', 'value', 'note'],
+        ['homeVisitSheet', '', 'วางลิงก์ Google Sheet ของแอปเยี่ยมบ้านเดิมในช่อง value แล้วรัน setupAppSheet อีกครั้งเพื่อตรวจ (เว้นว่าง = ไม่โยงแอปเยี่ยมบ้าน)']]);
+      asG.setFrozenRows(1);
+    }
+    // ---- AS_NewPatients: คำขอเพิ่มคนไข้ใหม่จากแอป (ข้อมูลที่กรอกแล้วไม่ถูกแตะ)
+    let asN = ss.getSheetByName(SHEET_AS_NEW);
+    const newCreated = !asN;
+    if (newCreated) asN = ss.insertSheet(SHEET_AS_NEW);
+    const nExisting = recHeaders_(asN);
+    const nAdd = AS_NEW_HEADERS.filter(h => nExisting.indexOf(h) === -1);
+    if (nAdd.length) {
+      recEnsureGrid_(asN, 2, nExisting.length + nAdd.length);
+      asN.getRange(1, nExisting.length + 1, 1, nAdd.length).setValues([nAdd]);
+    }
+    asN.setFrozenRows(1);
+    const nHeaders = recHeaders_(asN);
+    const nRows = Math.max(asN.getMaxRows() - 1, 1);
+    nHeaders.forEach((h, i) => {
+      if (AS_NEW_HEADERS.indexOf(h) === -1) return;
+      // เก็บเป็นข้อความทุกช่อง (เลขบัตร/เบอร์โทรจะได้ไม่ถูกแปลงเป็นตัวเลขจนเลข 0 นำหน้าหาย) ยกเว้นเวลาบันทึก
+      asN.getRange(2, i + 1, nRows, 1).setNumberFormat(h === AS_NEW.time ? 'yyyy-mm-dd hh:mm:ss' : '@');
+    });
+    if (newCreated) {
+      const sampleN = {};
+      sampleN[AS_NEW.id] = AS_SAMPLE_ID; sampleN[AS_NEW.first] = 'ตัวอย่าง'; sampleN[AS_NEW.last] = 'ทดสอบ'; sampleN[AS_NEW.by] = 'ตัวอย่าง@gmail.com';
+      sampleN[AS_NEW.time] = new Date(); sampleN[AS_NEW.status] = 'แถวตัวอย่างสำหรับตั้งค่า AppSheet ลบได้หลังสร้างแอปเสร็จ';
+      asN.getRange(2, 1, 1, nHeaders.length).setValues([nHeaders.map(h => sampleN[h] !== undefined ? sampleN[h] : '')]);
+    }
+    SpreadsheetApp.flush();
+
+    // ---- ตัวตรวจคำขอคนไข้ใหม่: ทุก 5 นาที + ทันทีที่ชีตถูกแก้ (ถ้า Google แจ้งเหตุการณ์จาก AppSheet มาให้)
+    let syncNote = '';
+    try { installAppSheetSync_(ss); syncNote = 'ตั้งให้ระบบตรวจคำขอคนไข้ใหม่จากแอปทุก 5 นาทีแล้ว'; }
+    catch (e) { syncNote = 'ตั้งตัวตรวจคำขอคนไข้ใหม่ไม่สำเร็จ (' + e.message + ') — รัน setupAppSheet อีกครั้งและกดอนุญาตสิทธิ์ที่ Google ถาม'; }
+
+    Logger.log('เตรียมแท็บสำหรับ AppSheet เรียบร้อย: ' + SHEET_AS_PATIENTS + ', ' + SHEET_AS_NEW + ', ' + SHEET_AS_ASSESS + ' (' + headers.length + ' คอลัมน์' + (add.length && !created ? ' เพิ่มใหม่ ' + add.length : '') + '), ' + SHEET_AS_COLUMNS);
+    Logger.log('ตารางสำหรับเพิ่มในแอป AppSheet: ' + SHEET_AS_ASSESS + ', ' + SHEET_AS_PATIENTS + ' และ ' + SHEET_AS_NEW + ' (ไม่ต้องเพิ่มแท็บอื่น)');
+    Logger.log(syncNote);
+    // ---- ตรวจการเชื่อมกับชีตของแอปเยี่ยมบ้านเดิม
+    try { CacheService.getScriptCache().remove('hv_rows'); } catch (e) { /* ไม่เป็นไร */ }
+    const hv = homeVisitRows_(true);
+    if (hv.status === 'off') Logger.log('แอปเยี่ยมบ้านเดิม: ยังไม่ได้วางลิงก์ในแท็บ ' + SHEET_AS_CONFIG + ' (ช่อง B2) — วางแล้วรัน setupAppSheet อีกครั้ง');
+    else if (hv.status !== 'ok') Logger.log('แอปเยี่ยมบ้านเดิม: เชื่อมไม่ได้ — ' + hv.error);
+    else {
+      const nids = {};
+      patientsData_().forEach(p => { const n = normNid_(p.nationalId); if (n) nids[n] = true; });
+      const ptns = {};
+      patientsData_().forEach(p => { ptns[normText_(p.ptn)] = true; });
+      const matched = hv.rows.filter(r => (r.ptn && ptns[r.ptn]) || (r.nid && nids[r.nid])).length;
+      Logger.log('แอปเยี่ยมบ้านเดิม: เชื่อมได้ อ่านได้ ' + hv.rows.length + ' แถว · จับคู่กับคนไข้ในทะเบียนได้ ' + matched + ' แถว' +
+        (hv.rows.length - matched ? ' · อีก ' + (hv.rows.length - matched) + ' แถวยังจับคู่ไม่ได้ (เลขบัตรไม่ตรงกับคนไข้ในทะเบียน หรือคนไข้ยังไม่เคยลงนัดในระบบนี้)' : ''));
+      if (hv.missing.length) Logger.log('หมายเหตุ: ไม่พบคอลัมน์ ' + hv.missing.join(', ') + ' ในชีตเยี่ยมบ้าน (ข้ามไป)');
+    }
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** ตั้ง trigger ให้ syncAppSheet ทำงานเอง (ลบของเดิมก่อน จึงรันซ้ำได้ไม่ซ้อนกัน) */
+function installAppSheetSync_(ss) {
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (t.getHandlerFunction() === 'syncAppSheet') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('syncAppSheet').timeBased().everyMinutes(5).create();
+  // เสริม: ทำงานทันทีเมื่อสเปรดชีตถูกแก้ไข — ถ้าตั้งไม่ได้ก็ยังมีรอบ 5 นาทีทำงานแทน
+  try { ScriptApp.newTrigger('syncAppSheet').forSpreadsheet(ss).onChange().create(); } catch (e) { /* ใช้รอบ 5 นาทีอย่างเดียว */ }
+}
+
+/** ข้อความจากแอป: ตัดช่องว่างเกิน จำกัดความยาว และไม่ให้ขึ้นต้นด้วยเครื่องหมายที่ชีตตีความเป็นสูตร */
+function asNewText_(v, max) {
+  return normText_(v).replace(/^[=+\-@\s]+/, '').slice(0, max);
+}
+/**
+ * อ่านคำขอที่ยังไม่มี PTN ในแท็บ AS_NewPatients
+ * คืน [{ row, id, first, last, nid, phone, moo, by, status, error }] — error = เหตุที่ยังออก PTN ไม่ได้ ('' = พร้อมออก)
+ */
+function asNewPending_(sheet) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+  const headers = recHeaders_(sheet);
+  const at = {};
+  Object.keys(AS_NEW).forEach(k => { at[k] = headers.indexOf(AS_NEW[k]); });
+  if (at.id === -1 || at.first === -1 || at.last === -1 || at.ptn === -1 || at.status === -1) return [];
+  const values = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
+  const out = [];
+  values.forEach((v, i) => {
+    const get = k => at[k] === -1 ? '' : v[at[k]];
+    const id = normText_(get('id'));
+    if (!id || id.indexOf(AS_SAMPLE_ID) === 0 || normText_(get('ptn'))) return;
+    const first = asNewText_(meaningful_(get('first')), 60), last = asNewText_(meaningful_(get('last')), 60);
+    const nidRaw = String(get('nid') === null || get('nid') === undefined ? '' : get('nid')).replace(/\D/g, '');
+    let error = '';
+    if (!first || !last) error = 'ยังไม่ได้ PTN: กรุณากรอกทั้งชื่อและนามสกุล';
+    else if (nidRaw && nidRaw.length !== 13) error = 'ยังไม่ได้ PTN: เลขบัตรประชาชนต้องมี 13 หลัก (แก้ให้ครบ หรือลบออกถ้าไม่ทราบ)';
+    out.push({ row: i + 2, id: id, first: first, last: last, nid: nidRaw.length === 13 ? nidRaw : '', phone: asNewText_(get('phone'), 20), moo: asNewText_(get('moo'), 10),
+      by: normText_(get('by')).slice(0, 80), status: normText_(get('status')), error: error, at: at });
+  });
+  return out;
+}
+/**
+ * ตรวจคำขอเพิ่มคนไข้ใหม่ที่ผู้ช่วยกรอกในแอป AppSheet (แท็บ AS_NewPatients) แล้วเขียน PTN กลับลงแถวนั้น
+ * ใช้กติกาเดียวกับตอนลงนัดในเว็บ (linkPatient_): เลขบัตรตรงกับคนในทะเบียน = คนเดิม · ชื่อ+นามสกุลตรงกับคนเดียวในทะเบียน = คนเดิม · นอกนั้นออก PTN ใหม่
+ * หลังได้ PTN แล้ว เลขบัตรและเบอร์โทรถูกย้ายไปเก็บในแท็บ Patients และลบออกจากแถวคำขอ (แท็บนี้ถูกส่งไปยังมือถือของผู้ใช้แอป)
+ * ถูกเรียกเองทุก 5 นาที (setupAppSheet ตั้งให้) — จะกดรันเองจากตัวแก้ไขก็ได้ คืนจำนวนแถวที่ได้ PTN ในรอบนี้
+ * (ชื่อฟังก์ชันไม่ลงท้ายด้วย _ เพื่อให้ตั้งเป็น trigger และเลือกรันได้)
+ */
+function syncAppSheet() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_AS_NEW);
+  if (!sheet) return 0;
+  // ตรวจเร็ว ๆ ก่อนโดยไม่ล็อก: ส่วนใหญ่ไม่มีอะไรต้องทำ
+  const actionable = t => !t.error || t.error !== t.status;
+  if (!asNewPending_(sheet).some(actionable)) return 0;
+  const lock = LockService.getScriptLock();
+  try { lock.waitLock(20000); } catch (e) { return 0; } // มีงานอื่นบันทึกอยู่: รอบถัดไปค่อยทำ
+  let done = 0;
+  try {
+    const todo = asNewPending_(sheet).filter(actionable).slice(0, AS_NEW_MAX_PER_RUN); // อ่านใหม่หลังได้ล็อก
+    todo.forEach(t => {
+      const put = (k, val) => { if (t.at[k] !== -1) sheet.getRange(t.row, t.at[k] + 1).setNumberFormat('@').setValue(val); };
+      // แถวอาจเลื่อนถ้ามีคนลบแถวอื่นระหว่างนี้: ตรวจว่า ID ยังตรงก่อนเขียน
+      if (normText_(sheet.getRange(t.row, t.at.id + 1).getValue()) !== t.id) return;
+      if (t.error) { put('status', t.error); return; }
+      delete _sheetCache_[SHEET_PATIENTS];
+      const byNid = t.nid ? patientsData_().some(p => normNid_(p.nationalId) === t.nid) : false;
+      const link = linkPatient_({ firstName: t.first, lastName: t.last, nationalId: t.nid, phone: t.phone, moo: t.moo }, { date: todayStr_(), locked: true });
+      if (!link.ok) { put('status', 'ยังไม่ได้ PTN: ' + link.error); return; }
+      put('ptn', link.ptn);
+      put('status', link.isNew ? 'ออก PTN ใหม่แล้ว' : ('เป็นคนไข้เดิมในทะเบียน (' + (byNid ? 'เลขบัตรตรงกัน' : 'ชื่อ-สกุลตรงกัน') + ')'));
+      put('nid', '');
+      put('phone', '');
+      recordLog_({ username: 'appsheet:' + t.by }, link.isNew ? 'appsheetNewPatient' : 'appsheetMatchPatient', t.id, link.ptn);
+      done++;
+    });
+    if (todo.length) SpreadsheetApp.flush();
+  } finally {
+    lock.releaseLock();
+  }
+  return done;
+}
+
+/** วันที่จากช่องที่ AppSheet เขียน: เป็นค่าวันที่ของชีต หรือข้อความ yyyy-MM-dd / d/M/yyyy (ปี พ.ศ. ก็รับ) */
+function asDate_(v) {
+  if (Object.prototype.toString.call(v) === '[object Date]') {
+    try {
+      if (isNaN(v)) return '';
+      const iso0 = fmtDate_(v);
+      // พิมพ์ปีเป็น พ.ศ. ในชีตที่นับปีแบบ ค.ศ. → ได้ค่าวันที่ปี 25xx: แปลงกลับเป็น ค.ศ.
+      return Number(iso0.slice(0, 4)) > 2400 ? (Number(iso0.slice(0, 4)) - 543) + iso0.slice(4) : iso0;
+    } catch (e) { return ''; }
+  }
+  const s = normText_(v);
+  let m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(s);
+  let y, mo, d;
+  if (m) { y = Number(m[1]); mo = Number(m[2]); d = Number(m[3]); }
+  else {
+    m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})/.exec(s);
+    if (!m) return '';
+    d = Number(m[1]); mo = Number(m[2]); y = Number(m[3]);
+  }
+  if (y > 2400) y -= 543;
+  const iso = y + '-' + ('0' + mo).slice(-2) + '-' + ('0' + d).slice(-2);
+  return recValidDate_(iso) ? iso : '';
+}
+
+/** ลิงก์/รหัสของชีตแอปเยี่ยมบ้านจากแท็บ AS_Config ('' = ไม่ได้ตั้ง) */
+function homeVisitSheetId_() {
+  if (!recSheet_(SHEET_AS_CONFIG)) return '';
+  const row = recRows_(SHEET_AS_CONFIG).find(r => normText_(r.key) === 'homeVisitSheet');
+  const m = /[-\w]{25,}/.exec(row ? normText_(row.value) : '');
+  return m ? m[0] : '';
+}
+/**
+ * อ่านแถวจากชีตของแอปเยี่ยมบ้านเดิม (อีกสเปรดชีตหนึ่ง) เฉพาะคอลัมน์ที่ใช้ — ไม่อ่านเบอร์โทร พิกัด รูป ลายเซ็น
+ * คืน { status: 'off' | 'ok' | 'error', rows: [{ id, ptn, nid, date, assessor, note, vals: {หัวคอลัมน์: ค่า} }], missing, error }
+ * พักผลไว้ในแคช 3 นาที (เปิดอีกสเปรดชีตหนึ่งช้ากว่าอ่านชีตตัวเอง) — fresh = true อ่านใหม่เสมอ
+ */
+function homeVisitRows_(fresh) {
+  const id = homeVisitSheetId_();
+  if (!id) return { status: 'off', rows: [], missing: [] };
+  const cache = CacheService.getScriptCache();
+  if (!fresh) {
+    try { const hit = cache.get('hv_rows'); if (hit) return JSON.parse(hit); } catch (e) { /* อ่านจากชีตแทน */ }
+  }
+  let out;
+  try {
+    const book = SpreadsheetApp.openById(id);
+    const need = ['วันที่ประเมิน', 'เลขบัตร ปชช'];
+    let values = null;
+    book.getSheets().some(sh => {
+      if (sh.getLastRow() < 1) return false;
+      const head = sh.getRange(1, 1, 1, Math.max(sh.getLastColumn(), 1)).getValues()[0].map(h => normText_(h));
+      if (!need.every(h => head.indexOf(h) !== -1)) return false;
+      values = sh.getDataRange().getValues();
+      return true;
+    });
+    if (!values) out = { status: 'error', rows: [], missing: [], error: 'ไม่พบแท็บที่มีคอลัมน์ "วันที่ประเมิน" และ "เลขบัตร ปชช" ในชีตที่ลิงก์ไว้' };
+    else {
+      const head = values[0].map(h => normText_(h));
+      const at = h => head.indexOf(h); // หัวคอลัมน์ซ้ำ (เช่น ICD10) ใช้คอลัมน์แรก
+      const wanted = HOME_VISIT_FIELDS.map(f => f.header).concat(HOME_VISIT_SHOW.map(f => f.header));
+      const rows = [];
+      for (let r = 1; r < values.length; r++) {
+        const row = values[r];
+        const get = h => at(h) === -1 ? '' : row[at(h)];
+        const rid = normText_(get('ID'));
+        const date = asDate_(get('วันที่ประเมิน'));
+        if (!rid || !date) continue;
+        const vals = {};
+        wanted.forEach(h => { const v = get(h); if (v !== '' && v !== null && v !== undefined) vals[h] = Object.prototype.toString.call(v) === '[object Date]' ? '' : String(v).slice(0, 60); });
+        rows.push({ id: rid, ptn: normText_(get('PTN')), nid: normNid_(get('เลขบัตร ปชช')), date: date, assessor: normText_(get('ผู้ประเมิน')).slice(0, 80),
+          note: normText_(get('คำแนะนำ/การรักษา')).slice(0, 300), vals: vals });
+      }
+      out = { status: 'ok', rows: rows, missing: wanted.filter(h => at(h) === -1) };
+    }
+  } catch (e) {
+    out = { status: 'error', rows: [], missing: [], error: 'เปิดชีตของแอปเยี่ยมบ้านไม่ได้ (' + e.message + ') — ตรวจลิงก์ในแท็บ ' + SHEET_AS_CONFIG + ' และให้บัญชีเจ้าของสเปรดชีตนี้เปิดชีตนั้นได้' };
+  }
+  try { const json = JSON.stringify(out); if (json.length < 95000) cache.put('hv_rows', json, 180); } catch (e) { /* ไม่แคชก็ได้ */ }
+  return out;
+}
+/** ผลจากแอปเยี่ยมบ้านของคนไข้ 1 คน: จับคู่ด้วย PTN (ถ้าชีตนั้นมีคอลัมน์ PTN) หรือเลขบัตรประชาชน 13 หลักที่ตรงกับทะเบียน */
+function homeVisitAssessments_(ptn) {
+  const hv = homeVisitRows_(false);
+  if (hv.status !== 'ok') return { list: [], error: hv.status === 'error' ? hv.error : '' };
+  const reg = patientsData_().find(p => normText_(p.ptn) === ptn);
+  const nid = reg ? normNid_(reg.nationalId) : '';
+  const today = todayStr_();
+  const list = [];
+  hv.rows.forEach(r => {
+    const mine = r.ptn ? r.ptn === ptn : (nid && r.nid === nid);
+    if (!mine || r.date > today) return;
+    const data = {}, items = [];
+    HOME_VISIT_FIELDS.forEach(f => {
+      const raw = r.vals[f.header];
+      if (raw === undefined) return;
+      const m = /^\s*(\d+(?:[.,]\d+)?)\s*$/.exec(String(raw));
+      if (!m) { items.push({ label: f.label, value: String(raw).slice(0, 40) }); return; } // เช่น "ADL Dependent": แสดงให้ดู ไม่ดึงเข้าแบบฟอร์ม
+      const v = Math.round(Number(m[1].replace(',', '.')) * 100) / 100;
+      if (v < 0 || v > f.max) return;
+      data[f.key] = String(v);
+      items.push({ label: f.label, value: f.key === 'pt_barthel' ? v + '/20' : String(v) });
+    });
+    HOME_VISIT_SHOW.forEach(f => { if (r.vals[f.header] !== undefined) items.push({ label: f.label, value: String(r.vals[f.header]).slice(0, 40) }); });
+    if (!items.length && !r.note) return;
+    list.push({ id: 'hv:' + r.id, source: 'เยี่ยมบ้าน', date: r.date, time: '', assessor: r.assessor, note: r.note, data: data, items: items });
+  });
+  return { list: list, error: '' };
+}
+
+/**
+ * ผลประเมินจาก AppSheet ของคนไข้ 1 คน (ใหม่สุดก่อน) ในรูปที่หน้าเวชระเบียนเติมลงแบบฟอร์มได้ทันที
+ * { id, date, time, assessor, note, data: { ช่องในเวชระเบียน: ค่า }, items: [{ label, value }] (สำหรับแสดงผลย่อ) }
+ * ค่าที่ไม่ถูกรูปแบบ/เกินช่วงถูกข้ามเป็นรายช่อง · แถวตัวอย่างและแถวที่ไม่มี PTN/วันที่ไม่ถูกนับ
+ */
+function clinicAssessments_(ptn) {
+  if (!ptn || !recSheet_(SHEET_AS_ASSESS)) return [];
+  let cols = [];
+  if (recSheet_(SHEET_AS_COLUMNS)) {
+    cols = recRows_(SHEET_AS_COLUMNS).map(r => ({ header: normText_(r.header), key: normText_(r.key), kind: normText_(r.kind) })).filter(c => c.header && c.key);
+  }
+  if (!cols.length) cols = appSheetColumns_();
+  const byKey = {};
+  cols.forEach(c => { byKey[c.key] = c; });
+  if (!byKey.ptn || !byKey.id) return [];
+  const cell = (row, key) => byKey[key] ? row[byKey[key].header] : '';
+  const out = [];
+  recRows_(SHEET_AS_ASSESS).forEach(row => {
+    const id = normText_(cell(row, 'id'));
+    if (!id || id.indexOf(AS_SAMPLE_ID) === 0) return;
+    if (normText_(cell(row, 'ptn')) !== ptn) return;
+    const tv = cell(row, 'time');
+    const isDate = Object.prototype.toString.call(tv) === '[object Date]' && !isNaN(tv);
+    const date = asDate_(cell(row, 'date')) || asDate_(tv);
+    if (!date || date > todayStr_()) return;
+    const data = {}, items = [];
+    cols.forEach(c => {
+      if (!RECORD_KEY_RE.test(c.key)) return;
+      const raw = row[c.header];
+      if (raw === '' || raw === null || raw === undefined) return;
+      let v;
+      if (c.kind === 'text') { v = normText_(raw).slice(0, 80); if (!v) return; }
+      else if (c.kind === 'enum' || c.kind === 'int') {
+        const m = /^\s*(-?\d+)\b/.exec(String(raw));
+        if (!m) return;
+        v = Number(m[1]);
+      } else { v = recNum_(typeof raw === 'string' ? raw.replace(',', '.') : raw); if (v === null) return; v = Math.round(v * 100) / 100; }
+      // ช่วงค่าที่ยอมรับของแต่ละช่อง
+      let lo = 0, hi = 99999;
+      if (/^p2_nrs_/.test(c.key)) hi = 10;
+      else if (c.key === 'pt_eq5d_vas') hi = 100;
+      else if (/^pt_eq5d_/.test(c.key)) { lo = 1; hi = 5; }
+      else { const b = /^pt_barthel_(\d+)$/.exec(c.key); if (b) hi = AS_BARTHEL[Number(b[1]) - 1] ? AS_BARTHEL[Number(b[1]) - 1][1].length - 1 : -1; }
+      if (c.kind !== 'text' && (v < lo || v > hi)) return;
+      data[c.key] = String(v);
+      if (!/^pt_(eq5d_(mo|sc|ua|pd|ad)|barthel_\d+)$/.test(c.key) && !/_label$/.test(c.key)) items.push({ label: c.header, value: String(v) });
+    });
+    // คะแนนรวมของแบบประเมินที่ติ๊กครบทุกข้อ
+    const eq = AS_EQ5D.map(d => data['pt_eq5d_' + d[0]]);
+    if (eq.every(x => x !== undefined)) {
+      const util = Math.round((1 - AS_EQ5D.reduce((s, d, i) => s + d[2][Number(eq[i]) - 1], 0)) * 1000) / 1000;
+      data.pt_eq5d = String(util);
+      items.push({ label: 'EQ-5D-5L ' + eq.join(''), value: util.toFixed(3) });
+    } else if (eq.some(x => x !== undefined)) items.push({ label: 'EQ-5D-5L', value: 'ตอบ ' + eq.filter(x => x !== undefined).length + '/5 มิติ' });
+    const ba = AS_BARTHEL.map((b, i) => data['pt_barthel_' + (i + 1)]);
+    if (ba.every(x => x !== undefined)) {
+      const total = ba.reduce((s, x) => s + Number(x), 0);
+      data.pt_barthel = String(total);
+      items.push({ label: 'Barthel ADL', value: total + '/20' });
+    } else if (ba.some(x => x !== undefined)) items.push({ label: 'Barthel ADL', value: 'ตอบ ' + ba.filter(x => x !== undefined).length + '/10 ข้อ' });
+    if (!Object.keys(data).length) return;
+    out.push({ id: id, source: 'ประเมิน', date: date, time: isDate ? tv.toISOString() : normText_(tv), assessor: normText_(cell(row, 'assessor')), note: normText_(cell(row, 'note')).slice(0, 300), data: data, items: items });
+  });
+  return out;
+}
+/** รวมผลจากทั้งสองแอป (ตารางประเมินใหม่ + แอปเยี่ยมบ้านเดิม) ใหม่สุดก่อน — { list, error } error = ข้อความเมื่อเชื่อมชีตเยี่ยมบ้านไม่ได้ */
+function fieldAssessments_(ptn) {
+  let list = [], error = '';
+  try { list = clinicAssessments_(ptn); } catch (e) { error = 'อ่านแท็บ ' + SHEET_AS_ASSESS + ' ไม่สำเร็จ: ' + e.message; }
+  try { const hv = homeVisitAssessments_(ptn); list = list.concat(hv.list); if (hv.error) error = hv.error; } catch (e) { error = 'อ่านผลจากแอปเยี่ยมบ้านไม่สำเร็จ: ' + e.message; }
+  list.sort((a, b) => (a.date < b.date ? 1 : (a.date > b.date ? -1 : 0)) || (a.time < b.time ? 1 : (a.time > b.time ? -1 : 0)));
+  return { list: list.slice(0, 80), error: error };
+}
+
 /* ---------------------------- ความพึงพอใจ (แบบประเมิน Google Form ไม่ระบุตัวตน) ---------------------------- */
 // คนไข้ตอบแบบประเมินผ่านลิงก์/QR ของ Google Form เมื่อไหร่ก็ได้ ไม่มีชื่อ ไม่ผูกกับนัดหรือ PTN
 // ฟอร์มถูก "ลิงก์ไปยังชีต" มาที่สเปรดชีตนี้ (Google สร้างแท็บคำตอบให้เอง) ระบบแค่อ่านแท็บนั้นมาสรุปตามช่วงเวลาที่กรอง
@@ -2561,7 +3056,7 @@ function setupSatisfactionForm() {
 
 const SYSTEM_SHEETS_ = [SHEET_USERS, SHEET_SCHEDULE, SHEET_SCHEDULE_SLOTS, SHEET_CLOSED, SHEET_BUSY, SHEET_APPTS, SHEET_CLINIC_TYPES,
   SHEET_CLINIC_DAYS, SHEET_CLINIC_RULES, SHEET_SPECIAL_OPEN, SHEET_SPECIAL_SLOTS, SHEET_ICD10, SHEET_ICD9, SHEET_EXTRA_SLOTS, SHEET_BUSY_RULES, SHEET_PATIENTS,
-  'Records', 'RecordOptions', 'AssessTests', 'AssessNorms', 'RecordLog'];
+  'Records', 'RecordOptions', 'AssessTests', 'AssessNorms', 'RecordLog', 'AS_Patients', 'AS_Assessments', 'AS_Columns', 'AS_Config'];
 
 /** หาแท็บคำตอบของแบบประเมิน: แท็บที่ลิงก์กับ Google Form (หรือแท็บที่หัวคอลัมน์แรกเป็น "ประทับเวลา"/"Timestamp") */
 function findFeedbackSheet_() {
