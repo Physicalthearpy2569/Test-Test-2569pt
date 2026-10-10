@@ -126,7 +126,7 @@ function jsonp_(action, payload) {
 // ปลุกสคริปต์ทันทีที่หน้าเว็บโหลด (ก่อนผู้ใช้กดอะไรเลย) เผื่อเครื่องเย็นอยู่ (ไม่มีคนใช้มาสักพัก)
 // กว่าผู้ใช้จะพิมพ์ชื่อ/รหัสผ่านแล้วกดเข้าสู่ระบบเสร็จ สคริปต์มักจะอุ่นพอแล้ว ไม่ต้องรอผลอะไรจากตรงนี้
 // คำตอบของ ping บอกรุ่นของหลังบ้านด้วย ใช้เตือนเมื่อวางโค้ดใหม่ใน Apps Script แล้วแต่ยังไม่ได้อัปเดตเว็บแอปเป็นเวอร์ชันใหม่
-const EXPECTED_BACKEND = '2026-10-12a';
+const EXPECTED_BACKEND = '2026-10-13a';
 jsonp_('ping', {}).then(checkBackendVersion_).catch(backendUnreachable_);
 
 /** ping ไม่ได้คำตอบเลย: ส่วนใหญ่คืออัปเดตเว็บแอปก่อนอนุมัติสิทธิ์ใหม่ของสคริปต์ หรือเน็ตมีปัญหา */
@@ -262,6 +262,8 @@ function logout() {
   state.dashboardLoaded = false;
   const dashBody = document.getElementById('dashBody');
   if (dashBody) dashBody.innerHTML = '';
+  document.getElementById('dashTabs')?.classList.add('hidden');
+  if (typeof dashReset_ === 'function') dashReset_();
   localStorage.clear();
   document.getElementById('appView').classList.add('hidden');
   document.getElementById('loginView').classList.remove('hidden');
@@ -272,6 +274,7 @@ function enterApp() {
   document.getElementById('loginView').classList.add('hidden');
   document.getElementById('appView').classList.remove('hidden');
   document.getElementById('whoName').textContent = state.displayName;
+  renderMast_();
   document.getElementById('pwBanner')?.classList.toggle('hidden', localStorage.getItem('weakPassword') !== '1');
   document.getElementById('whoRole').textContent = state.role === 'physio' ? 'นักกายภาพบำบัด' : 'เจ้าหน้าที่นัดหมาย';
   document.querySelectorAll('.physio-only').forEach(el => {
@@ -342,7 +345,21 @@ function markAttendedLocal_(id, attended) {
   renderToday_();
 }
 
+/** หัวเว็บ: วันที่วันนี้ และสรุปนัดของวันนี้ (เมื่อโหลดรายการนัดวันนี้แล้ว) */
+function renderMast_() {
+  const dateEl = document.getElementById('mastDate'), sumEl = document.getElementById('mastToday');
+  if (!dateEl || !sumEl) return;
+  const now = new Date();
+  const days = ['อาทิตย์', 'จันทร์', 'อังคาร', 'พุธ', 'พฤหัสบดี', 'ศุกร์', 'เสาร์'];
+  dateEl.textContent = `วัน${days[now.getDay()]}ที่ ${now.getDate()} ${MONTH_NAMES[now.getMonth()]} ${now.getFullYear() + 543}`;
+  const d = state.todayDetail;
+  if (!d || d.date !== todayYmd_()) { sumEl.textContent = ''; return; }
+  const appts = d.appointments || [];
+  sumEl.textContent = appts.length ? `นัดวันนี้ ${appts.length} ราย มาแล้ว ${appts.filter(a => a.attendedAt).length} ราย` : (d.isOpen ? 'วันนี้ยังไม่มีนัด' : 'วันนี้ปิดทำการ');
+}
+
 function renderToday_() {
+  renderMast_();
   const panel = document.getElementById('todayPanel');
   const list = document.getElementById('todayList');
   const d = state.todayDetail;
@@ -2161,6 +2178,11 @@ function setDashPreset_(preset) {
   } else if (preset === 'lastMonth') {
     from = new Date(now.getFullYear(), now.getMonth() - 1, 1);
     to = new Date(now.getFullYear(), now.getMonth(), 0);
+  } else if (preset === 'quarter') {
+    // ไตรมาสของปีงบประมาณ: ต.ค.-ธ.ค. / ม.ค.-มี.ค. / เม.ย.-มิ.ย. / ก.ค.-ก.ย.
+    const m0 = Math.floor(now.getMonth() / 3) * 3;
+    from = new Date(now.getFullYear(), m0, 1);
+    to = new Date(now.getFullYear(), m0 + 3, 0);
   } else if (preset === 'fiscal') {
     // ปีงบประมาณไทย: 1 ต.ค. - 30 ก.ย.
     const startYear = now.getMonth() >= 9 ? now.getFullYear() : now.getFullYear() - 1;
@@ -2175,6 +2197,7 @@ function setDashPreset_(preset) {
   document.getElementById('dashFrom').value = ymd_(from);
   document.getElementById('dashTo').value = ymd_(to);
   document.querySelectorAll('.dash-presets button').forEach(b => b.classList.toggle('active', b.dataset.preset === preset));
+  if (typeof dashPeriodShow_ === 'function') dashPeriodShow_('custom'); // ปุ่มลัดตั้งวันที่ให้แล้ว โชว์ช่องวันที่ให้เห็นช่วงที่ใช้
 }
 
 document.querySelectorAll('.dash-presets button').forEach(b => {
@@ -2182,6 +2205,7 @@ document.querySelectorAll('.dash-presets button').forEach(b => {
 });
 document.getElementById('dashApplyBtn')?.addEventListener('click', () => {
   document.querySelectorAll('.dash-presets button').forEach(b => b.classList.remove('active'));
+  if (typeof dashPeriodApply_ === 'function') dashPeriodApply_(); // เดือน / ไตรมาส / ปีงบประมาณ ที่เลือก -> วันที่เริ่มและสิ้นสุด
   loadDashboard();
 });
 document.getElementById('refreshDashboardBtn')?.addEventListener('click', loadDashboard);
@@ -2204,6 +2228,12 @@ async function loadDashboard() {
 function pct_(n, d) { return d ? Math.round((n / d) * 100) : 0; }
 
 function renderDashboard(d) {
+  // หน้าสถิติแบบแท็บ + แผนที่อยู่ใน dashboard.js — ถ้าไฟล์นั้นยังไม่ถูกอัปโหลด ใช้หน้าสถิติแบบเดิมด้านล่างแทน
+  if (typeof dashRender_ === 'function') {
+    document.getElementById('dashNote').textContent = `ช่วง ${fmtThaiDate_(d.from)} ถึง ${fmtThaiDate_(d.to)}` + (d.trackingStart ? ` เริ่มมีข้อมูล "มาแล้ว" ตั้งแต่ ${fmtThaiDate_(d.trackingStart)}` : ' ยังไม่เคยมีการบันทึก "มาแล้ว"');
+    dashRender_(d);
+    return;
+  }
   const note = document.getElementById('dashNote');
   const t = d.totals;
   const rateTxt = t.attendanceRate === null ? 'ยังไม่มีข้อมูล' : pct_(t.trackedPast ? Math.round(t.attendanceRate * t.trackedPast) : 0, t.trackedPast) + '%';

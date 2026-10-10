@@ -45,7 +45,7 @@ const PTN_FISCAL_YEAR = false; // false = นับปีตามปฏิท�
 
 // รุ่นของโค้ดหลังบ้าน — หน้าเว็บ (app.js) ใช้ค่านี้ตรวจว่าเว็บแอปถูกอัปเดตเป็นเวอร์ชันใหม่แล้วหรือยัง
 // (วางโค้ดใหม่ใน Apps Script แล้วแต่ยังไม่ได้กด "จัดการการทำให้ใช้งานได้ > เวอร์ชันใหม่" เว็บจะยังเรียกโค้ดรุ่นเก่าอยู่)
-const BACKEND_VERSION = '2026-10-12a';
+const BACKEND_VERSION = '2026-10-13a';
 
 const BUSY_TYPES = ['ประชุม', 'ทำเอกสาร', 'อบรม', 'ลา'];
 const APPT_TYPES = ['OPD', 'ลงชุมชน'];
@@ -252,6 +252,8 @@ function route_(action, payload) {
     case 'removeClinicDay': return requirePhysio_(auth, () => removeClinicDay_(payload));
     case 'getClinicRules': return requirePhysio_(auth, () => getClinicRules_());
     case 'getDashboard': return requirePhysio_(auth, () => getDashboard_(payload));
+    case 'getOutcomes': return requirePhysio_(auth, () => getOutcomes_(payload, auth));
+    case 'getDashboardCompare': return requirePhysio_(auth, () => getDashboardCompare_(payload));
     case 'addClinicRule': return requirePhysio_(auth, () => addClinicRule_(payload));
     case 'removeClinicRule': return requirePhysio_(auth, () => removeClinicRule_(payload));
     case 'updateClinicRule': return requirePhysio_(auth, () => updateClinicRule_(payload));
@@ -1865,6 +1867,7 @@ function getDashboard_(payload) {
       status: r.status,
       attendedDate: r.attendedAt ? Utilities.formatDate(new Date(r.attendedAt), tz, 'yyyy-MM-dd') : '',
       ptn: normText_(r.ptn),
+      icd10: r.icd10,
       key: normText_(r.ptn) ? 'ptn:' + normText_(r.ptn) : patientKey_(r) // มี PTN ใช้ PTN นับคน (แม่นกว่าชื่อ)
     }));
 
@@ -1906,12 +1909,39 @@ function getDashboard_(payload) {
   const mooMap = {};
   active.forEach(a => {
     const m = a.moo || 'ไม่ระบุ';
-    if (!mooMap[m]) mooMap[m] = { name: m, total: 0, attended: 0 };
+    if (!mooMap[m]) mooMap[m] = { name: m, total: 0, attended: 0, cases: 0, _seen: {} };
     mooMap[m].total++;
-    if (a.attendedDate) mooMap[m].attended++;
+    if (a.attendedDate) {
+      mooMap[m].attended++;
+      if (!mooMap[m]._seen[a.key]) { mooMap[m]._seen[a.key] = true; mooMap[m].cases++; } // เคส = คนไม่นับซ้ำที่มารับบริการจากหมู่นั้น
+    }
   });
+  Object.keys(mooMap).forEach(k => { delete mooMap[k]._seen; });
   const byMoo = Object.keys(mooMap).map(k => mooMap[k])
     .sort((x, y) => (y.attended - x.attended) || (y.total - x.total) || cmpMoo_(x.name, y.name));
+
+  // แยกตามโรค (ICD-10) รายหมู่ — ใช้กรองแผนที่ตำบลตามโรคได้ทันทีโดยไม่ต้องโหลดใหม่
+  // นับเฉพาะนัดที่มารับบริการแล้ว ไม่นับรหัสอัตโนมัติ (Z501) ที่ติดทุกนัด · นัดที่มี 2 โรคถูกนับในทั้งสองโรค · ส่งเฉพาะ 40 โรคที่มารับบริการมากสุด
+  const dxLabel = {};
+  icdCodeList_(SHEET_ICD10).forEach(c => { dxLabel[c.code] = normText_(c.label); });
+  const dxMap = {};
+  attended.forEach(a => {
+    const m = a.moo || 'ไม่ระบุ';
+    icdCodes_(a.icd10).forEach(code => {
+      if (code === ICD10_AUTO_CODE) return;
+      if (!dxMap[code]) dxMap[code] = { code: code, label: dxLabel[code] || '', visits: 0, cases: 0, moo: {}, _seen: {} };
+      const dx = dxMap[code];
+      if (!dx.moo[m]) dx.moo[m] = { name: m, attended: 0, cases: 0, _seen: {} };
+      dx.visits++;
+      dx.moo[m].attended++;
+      if (!dx.moo[m]._seen[a.key]) { dx.moo[m]._seen[a.key] = true; dx.moo[m].cases++; }
+      if (!dx._seen[a.key]) { dx._seen[a.key] = true; dx.cases++; }
+    });
+  });
+  const byMooIcd = Object.keys(dxMap).map(k => dxMap[k])
+    .sort((x, y) => (y.visits - x.visits) || (x.code < y.code ? -1 : 1)).slice(0, 40)
+    .map(dx => ({ code: dx.code, label: dx.label, visits: dx.visits, cases: dx.cases,
+      byMoo: Object.keys(dx.moo).map(k => ({ name: dx.moo[k].name, attended: dx.moo[k].attended, cases: dx.moo[k].cases })) }));
 
   // แยกตามคลินิก: ใช้การตั้งค่าคลินิก "ปัจจุบัน" ของแต่ละวันที่นัด
   const clinicCache = {};
@@ -1995,10 +2025,125 @@ function getDashboard_(payload) {
         newCases: newCases,
         returningCases: keys.length - newCases
       },
-      byType, byMoo, byClinic, byWeekday, trend,
+      byType, byMoo, byMooIcd, byClinic, byWeekday, trend,
       feedback: feedbackForDashboard_(from, to, attended.length)
     }
   };
+}
+
+/** วันที่เดียวกันของ k ปีก่อน ('yyyy-MM-dd') — 29 ก.พ. ของปีที่ไม่มี ใช้ 28 ก.พ. */
+function shiftYears_(ymd, k) {
+  const y = Number(ymd.slice(0, 4)) - k;
+  const md = ymd.slice(4);
+  const out = y + md;
+  return recValidDate_(out) ? out : y + '-02-28';
+}
+/**
+ * ตัวเลขหลักของช่วง [from, to] เทียบกับช่วงเดียวกันของ 1-3 ปีก่อน (payload: { from, to, years })
+ * คืน periods เรียงจากปีเก่าสุดไปช่วงปัจจุบัน: { from, to, visits, cases, newCases, appointments, noShow, attendanceRate, satisfaction, respondents }
+ * ใช้การคำนวณเดียวกับ getDashboard_ ทุกช่วง ตัวเลขจึงตรงกับหน้าสถิติของช่วงนั้นเสมอ
+ */
+function getDashboardCompare_(payload) {
+  const re = /^\d{4}-\d{2}-\d{2}$/;
+  const from = String(payload.from || ''), to = String(payload.to || '');
+  if (!re.test(from) || !re.test(to)) return { ok: false, error: 'รูปแบบวันที่ไม่ถูกต้อง' };
+  const years = Math.max(1, Math.min(3, Math.floor(Number(payload.years) || 1)));
+  const periods = [];
+  for (let k = years; k >= 0; k--) {
+    const f = shiftYears_(from, k), t = shiftYears_(to, k);
+    const r = getDashboard_({ from: f, to: t });
+    if (!r.ok) return r;
+    const tt = r.data.totals, fb = r.data.feedback;
+    periods.push({ from: f, to: t, visits: tt.visits, cases: tt.cases, newCases: tt.newCases, appointments: tt.appointments, noShow: tt.noShow,
+      attendanceRate: tt.attendanceRate, satisfaction: fb && fb.overall ? fb.overall.percent : null, respondents: fb && fb.total ? fb.total : 0 });
+  }
+  return { ok: true, data: { periods: periods } };
+}
+
+/* ---------------------------- สถิติผลลัพธ์จากเวชระเบียน (หน้าสถิติ แท็บ "ผลลัพธ์การรักษา") ---------------------------- */
+
+/**
+ * ค่าที่วัดได้ต่ำกว่าเกณฑ์หรือไม่ — true / false / null (รายการนั้นยังไม่มีเกณฑ์)
+ * ต้องตรงกับ recCriterion_ ใน record.js: อายุอยู่ในตารางค่าปกติและรู้เพศ ใช้ตารางตามอายุ/เพศ · นอกนั้นใช้เกณฑ์ค่าเดียว (riskBelow / riskAbove)
+ */
+function assessBelow_(test, value, age, sex, norms) {
+  if (age !== null && sex) {
+    const norm = norms.find(n => n.testKey === test.key && n.sex === sex && age >= n.ageFrom && age <= n.ageTo);
+    if (norm) {
+      const nums = [norm.normalLow, norm.normalHigh].filter(v => v !== null && v !== undefined);
+      return test.better === 'lower' ? value > Math.max.apply(null, nums) : value < Math.min.apply(null, nums);
+    }
+  }
+  if (test.riskBelow !== null && test.riskBelow !== undefined) return value < test.riskBelow;
+  if (test.riskAbove !== null && test.riskAbove !== undefined) return value > test.riskAbove;
+  return null;
+}
+
+/**
+ * สรุปผลจากเวชระเบียน (แบบประเมินครั้งแรก) ที่ "บันทึกเวชระเบียน" แล้ว และวันที่ประเมินอยู่ในช่วง [from, to]
+ * ส่งกลับเฉพาะตัวเลขสรุป ไม่มีชื่อ PTN หรือค่าของรายคน
+ *   records / patients / drafts (ฉบับร่างในช่วงนี้ ไม่ถูกนับ)
+ *   nrs: { rest: {n, avg}, func: {n, avg} }            ระดับปวดแรกรับ
+ *   tests: [{ key, name, unit, tested, below, noCriterion }]  เฉพาะรายการที่มีคนถูกทดสอบในช่วงนี้
+ *   barthel: { n, social, home, bed }                   12-20 / 5-11 / 0-4 คะแนน
+ *   eq5d: { n, avg }
+ */
+function getOutcomes_(payload, auth) {
+  const re = /^\d{4}-\d{2}-\d{2}$/;
+  const from = String(payload.from || ''), to = String(payload.to || '');
+  if (!re.test(from) || !re.test(to)) return { ok: false, error: 'รูปแบบวันที่ไม่ถูกต้อง' };
+  if (from > to) return { ok: false, error: 'วันที่เริ่มต้องไม่เกินวันที่สิ้นสุด' };
+  const empty = { from: from, to: to, records: 0, patients: 0, drafts: 0, nrs: { rest: { n: 0, avg: null }, func: { n: 0, avg: null } }, tests: [], barthel: { n: 0, social: 0, home: 0, bed: 0 }, eq5d: { n: 0, avg: null } };
+  if (!recSheet_(SHEET_RECORDS)) return { ok: true, data: empty };
+
+  const tests = assessTestsAll_().filter(t => t.active && t.key !== 'eq5d' && t.key !== 'barthel');
+  const norms = assessNorms_();
+  const extra = {};
+  patientsData_().forEach(p => { extra[normText_(p.ptn)] = patientExtra_(p); });
+  const num = (v, lo, hi) => { const n = recNum_(typeof v === 'string' ? v.trim() : v); return n !== null && n >= lo && n <= hi ? n : null; };
+  const mean = a => a.length ? Math.round(a.reduce((x, y) => x + y, 0) / a.length * 100) / 100 : null;
+
+  const out = empty, seen = {}, rest = [], func = [], eq = [];
+  const tally = {};
+  tests.forEach(t => { tally[t.key] = { key: t.key, name: t.name, unit: t.unit, tested: 0, below: 0, noCriterion: 0 }; });
+  recRows_(SHEET_RECORDS).forEach(r => {
+    const m = recordMeta_(r);
+    if (!m.id || !m.ptn || !re.test(m.date) || m.date < from || m.date > to) return;
+    if (m.status !== 'final') { out.drafts++; return; }
+    out.records++;
+    seen[m.ptn] = true;
+    // อายุ ณ วันที่ประเมิน: จากวันเกิดในทะเบียน ถ้าไม่มีใช้อายุที่พิมพ์ไว้ในแบบฟอร์ม
+    const ex = extra[m.ptn] || { sex: '', birthDate: '' };
+    let age = null;
+    if (ex.birthDate) {
+      age = Number(m.date.slice(0, 4)) - Number(ex.birthDate.slice(0, 4));
+      if (m.date.slice(5) < ex.birthDate.slice(5)) age--;
+      if (!(age >= 0 && age < 130)) age = null;
+    }
+    if (age === null) { const typed = num(r.p1_age, 0, 129); age = typed === null ? null : Math.floor(typed); }
+
+    const a = num(r.p2_nrs_rest, 0, 10), b = num(r.p2_nrs_func, 0, 10);
+    if (a !== null) rest.push(a);
+    if (b !== null) func.push(b);
+    tests.forEach(t => {
+      const v = num(r['pt_' + t.key], 0, 99999);
+      if (v === null) return;
+      const below = assessBelow_(t, v, age, ex.sex, norms);
+      tally[t.key].tested++;
+      if (below === null) tally[t.key].noCriterion++;
+      else if (below) tally[t.key].below++;
+    });
+    const ba = num(r.pt_barthel, 0, 20);
+    if (ba !== null) { out.barthel.n++; if (ba >= 12) out.barthel.social++; else if (ba >= 5) out.barthel.home++; else out.barthel.bed++; }
+    const e = num(r.pt_eq5d, -1, 1);
+    if (e !== null) eq.push(e);
+  });
+  out.patients = Object.keys(seen).length;
+  out.nrs = { rest: { n: rest.length, avg: mean(rest) }, func: { n: func.length, avg: mean(func) } };
+  out.tests = tests.map(t => tally[t.key]).filter(t => t.tested > 0);
+  out.eq5d = { n: eq.length, avg: mean(eq) };
+  if (out.records) recordLog_(auth, 'outcomes', '', '');
+  return { ok: true, data: out };
 }
 
 /* ---------------------------- เวชระเบียน: แบบประเมินครั้งแรกของแต่ละ session ---------------------------- */
